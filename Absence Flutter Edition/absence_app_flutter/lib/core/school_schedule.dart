@@ -191,4 +191,34 @@ class SchoolSchedule {
     final status = hourStatus ?? getCurrentSchoolHour();
     return isTeachingHour(status);
   }
+
+  /// Εύρεση διδακτικής ώρας από όνομα (π.χ. "1η ώρα").
+  static Map<String, String>? getTeachingHourByName(String periodName) {
+    final needle = periodName.trim();
+    if (needle.isEmpty) return null;
+    for (final hour in _teachingHours) {
+      if ((hour['name'] ?? '').trim() == needle) return hour;
+    }
+    return null;
+  }
+
+  /// Ώρα έναρξης διδακτικής ώρας σε λεπτά από τα μεσάνυχτα.
+  static int? getPeriodStartMinutes(String periodName) {
+    final hour = getTeachingHourByName(periodName);
+    if (hour == null) return null;
+    return _parseTime(hour['start']);
+  }
+
+  /// Προθεσμία υπενθύμισης αποστολής: έναρξη ώρας + [minutesAfterStart] (π.χ. 08:15 → 08:30).
+  static DateTime? getSubmitReminderDeadline(
+    String periodName, {
+    int minutesAfterStart = 15,
+    DateTime? onDate,
+  }) {
+    final startMins = getPeriodStartMinutes(periodName);
+    if (startMins == null) return null;
+    final day = onDate ?? DateTime.now();
+    return DateTime(day.year, day.month, day.day)
+        .add(Duration(minutes: startMins + minutesAfterStart));
+  }
 }

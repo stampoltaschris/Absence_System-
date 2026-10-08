@@ -1,5 +1,10 @@
-import 'package:flutter/material.dart';
+import 'dart:async';
 
+import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import '../../core/school_schedule.dart';
 import '../../services/api_service.dart';
 
 class TakeAttendancePage extends StatefulWidget {
@@ -20,24 +25,167 @@ class TakeAttendancePage extends StatefulWidget {
   State<TakeAttendancePage> createState() => _TakeAttendancePageState();
 }
 
-class _TakeAttendancePageState extends State<TakeAttendancePage> {
+class _TakeAttendancePageState extends State<TakeAttendancePage>
+    with SingleTickerProviderStateMixin {
   List<Map<String, dynamic>> _students = [];
   List<dynamic> _teachers = [];
   bool _isLoading = false;
+  bool _hasSubmitted = false;
+
+  /// Υπενθύμιση αποστολής (ήχος + αναβοσβήσιμο)
+  bool _showSubmitReminder = false;
+  Timer? _selectionReminderTimer;
+  Timer? _deadlineCheckTimer;
+  Timer? _alertSoundTimer;
+  late final AnimationController _flashController;
+  late final AudioPlayer _alertPlayer;
+  late final DateTime _pageOpenedAt;
 
   bool get _hourlyOnly => widget.hourlyRemovalOnly;
+
+  bool get _hasAnyMarked =>
+      _students.any((s) => s['absent'] == true);
 
   @override
   void initState() {
     super.initState();
+    _pageOpenedAt = DateTime.now();
+    _flashController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 600),
+    );
+    _alertPlayer = AudioPlayer();
     _loadInitialData();
+    if (!_hourlyOnly) {
+      _deadlineCheckTimer = Timer.periodic(
+        const Duration(seconds: 5),
+        (_) => _checkDeadlineReminder(),
+      );
+      // Έλεγχος αμέσως (π.χ. άνοιγμα μετά τις 08:30)
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _checkDeadlineReminder();
+      });
+    }
   }
 
   @override
   void dispose() {
-    ApiService.unlockClass(widget.className);
+    _selectionReminderTimer?.cancel();
+    _deadlineCheckTimer?.cancel();
+    _stopAlertEffects();
+    _flashController.dispose();
+    _alertPlayer.dispose();
+    if (!_hasSubmitted) {
+      ApiService.unlockClass(widget.className);
+    }
     super.dispose();
   }
+
+  // ── Υπενθυμίσεις αποστολής ──────────────────────────────────────────
+
+  void _onAbsenceSelectionChanged() {
+    if (_hourlyOnly || _hasSubmitted) return;
+
+    _selectionReminderTimer?.cancel();
+
+    if (!_hasAnyMarked) return;
+
+    // Περίπτωση α: 5′ μετά την τελευταία επιλογή απόντα
+    _selectionReminderTimer = Timer(const Duration(minutes: 5), () {
+      if (!mounted || _hasSubmitted) return;
+      if (_hasAnyMarked) {
+        _triggerSubmitReminder();
+      }
+    });
+  }
+
+  DateTime _resolveAllPresentDeadline() {
+    final fromSchedule = SchoolSchedule.getSubmitReminderDeadline(
+      widget.currentPeriod,
+    );
+    final inTeachingHour = SchoolSchedule.isTeachingHour(
+      SchoolSchedule.getCurrentSchoolHour(),
+    );
+
+    // Εκτός ωραρίου / test mode: 15′ από το άνοιγμα της οθόνης
+    if (SchoolSchedule.forceTestMode && !inTeachingHour) {
+      return _pageOpenedAt.add(const Duration(minutes: 15));
+    }
+
+    if (fromSchedule != null) {
+      return fromSchedule;
+    }
+    return _pageOpenedAt.add(const Duration(minutes: 15));
+  }
+
+  void _checkDeadlineReminder() {
+    if (_hourlyOnly || _hasSubmitted || _showSubmitReminder) return;
+    // Περίπτωση β: χωρίς επιλεγμένους απόντες → υπενθύμιση στην προθεσμία (π.χ. 08:30)
+    if (_hasAnyMarked) return;
+
+    final deadline = _resolveAllPresentDeadline();
+    if (!DateTime.now().isBefore(deadline)) {
+      _triggerSubmitReminder();
+    }
+  }
+
+  Future<void> _triggerSubmitReminder() async {
+    if (!mounted || _hasSubmitted || _showSubmitReminder) return;
+
+    setState(() => _showSubmitReminder = true);
+    _flashController.repeat(reverse: true);
+    await _playAlertSound();
+    _alertSoundTimer?.cancel();
+    _alertSoundTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      _playAlertSound();
+    });
+  }
+
+  Future<void> _playAlertSound() async {
+    try {
+      SystemSound.play(SystemSoundType.alert);
+      HapticFeedback.heavyImpact();
+      await _alertPlayer.stop();
+      await _alertPlayer.play(AssetSource('audio/submit_reminder.wav'));
+    } catch (_) {
+      // Οπτική υπενθύμιση παραμένει ακόμα κι αν αποτύχει ο ήχος
+    }
+  }
+
+  void _stopAlertEffects() {
+    _alertSoundTimer?.cancel();
+    _alertSoundTimer = null;
+    _flashController.stop();
+    _flashController.reset();
+    _alertPlayer.stop();
+  }
+
+  void _dismissSubmitReminder() {
+    _stopAlertEffects();
+    if (!mounted) return;
+    setState(() => _showSubmitReminder = false);
+
+    // Επανάληψη σε 2′ αν ακόμα δεν έχει γίνει αποστολή
+    if (_hasAnyMarked) {
+      _selectionReminderTimer?.cancel();
+      _selectionReminderTimer = Timer(const Duration(minutes: 2), () {
+        if (!mounted || _hasSubmitted) return;
+        if (_hasAnyMarked) _triggerSubmitReminder();
+      });
+    }
+  }
+
+  void _clearReminderStateAfterSubmit() {
+    _hasSubmitted = true;
+    _selectionReminderTimer?.cancel();
+    _deadlineCheckTimer?.cancel();
+    _stopAlertEffects();
+    if (_showSubmitReminder && mounted) {
+      setState(() => _showSubmitReminder = false);
+    }
+  }
+
+  // ── Φόρτωση / υποβολή ───────────────────────────────────────────────
 
   Future<void> _loadInitialData() async {
     setState(() => _isLoading = true);
@@ -95,10 +243,10 @@ class _TakeAttendancePageState extends State<TakeAttendancePage> {
                   'name': s['name'] ?? existing['studentName'] ?? '',
                   'guardianEmail':
                       s['email'] ?? existing['guardianEmail'] ?? '',
-                  'absent': isAbsent,
+                  'absent': isAbsent || isExcused,
                   'isExcused': isExcused,
                   'isHourlyRemoval': isHourly,
-                  'wasAlreadyAbsent': isAbsent && !isHourly,
+                  'wasAlreadyAbsent': (isAbsent && !isHourly) || isExcused,
                   'wasAlreadyHourly': isHourly,
                   'lockedStatus': isAbsent || isExcused || isHourly,
                   'excusedByTeacherId': null,
@@ -136,23 +284,24 @@ class _TakeAttendancePageState extends State<TakeAttendancePage> {
     }
   }
 
-  Future<void> _submitAttendance() async {
-    setState(() => _isLoading = true);
-
-    final List<Map<String, dynamic>> absencesList = _students.map((s) {
-      final bool isAbsent = s['absent'] ?? false;
+  List<Map<String, dynamic>> _buildAbsencesPayload() {
+    return _students.map((s) {
+      final bool marked = s['absent'] ?? false;
       final bool isHourlyRemoval =
-          isAbsent ? (s['isHourlyRemoval'] ?? false) : false;
+          marked ? (s['isHourlyRemoval'] ?? false) : false;
       final bool isExcused =
-          isAbsent && !isHourlyRemoval ? (s['isExcused'] ?? false) : false;
+          marked && !isHourlyRemoval ? (s['isExcused'] ?? false) : false;
+      final bool isAbsentForDb = isHourlyRemoval
+          ? true
+          : (isExcused ? false : marked);
 
       return {
         'studentId': s['id'],
         'student_id': s['id'],
         'studentName': s['name'],
-        'absent': isAbsent,
-        'isAbsent': isAbsent,
-        'is_absent': isAbsent ? 1 : 0,
+        'absent': isAbsentForDb,
+        'isAbsent': isAbsentForDb,
+        'is_absent': isAbsentForDb ? 1 : 0,
         'isHourlyRemoval': isHourlyRemoval,
         'is_hourly_removal': isHourlyRemoval,
         'isExcused': isExcused,
@@ -168,11 +317,25 @@ class _TakeAttendancePageState extends State<TakeAttendancePage> {
         'guardianEmail': s['guardianEmail'] ?? '',
       };
     }).toList();
+  }
+
+  Future<void> _submitAttendance({required bool allPresent}) async {
+    setState(() => _isLoading = true);
+
+    if (allPresent) {
+      for (final s in _students) {
+        s['absent'] = false;
+        s['isExcused'] = false;
+        s['isHourlyRemoval'] = false;
+        s['excusedByTeacherId'] = null;
+        s['excuseReason'] = null;
+      }
+    }
 
     final result = await ApiService.submitAttendance(
       className: widget.className,
       period: widget.currentPeriod,
-      absences: absencesList,
+      absences: _buildAbsencesPayload(),
     );
 
     setState(() => _isLoading = false);
@@ -180,9 +343,14 @@ class _TakeAttendancePageState extends State<TakeAttendancePage> {
     if (!mounted) return;
 
     if (result['success'] == true) {
+      _clearReminderStateAfterSubmit();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(result['message'] ?? 'Οι απουσίες υποβλήθηκαν!'),
+          content: Text(
+            allPresent
+                ? (result['message'] ?? 'Καταχωρήθηκε: όλοι παρόντες.')
+                : (result['message'] ?? 'Οι απουσίες υποβλήθηκαν!'),
+          ),
           backgroundColor: Colors.green,
         ),
       );
@@ -194,6 +362,32 @@ class _TakeAttendancePageState extends State<TakeAttendancePage> {
           backgroundColor: Colors.red,
         ),
       );
+    }
+  }
+
+  Future<void> _confirmAllPresent() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Όλοι παρόντες;'),
+        content: Text(
+          'Θα καταχωρηθεί το τμήμα ${widget.className} χωρίς απουσίες '
+          'για την ${widget.currentPeriod}. Συνέχεια;',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Άκυρο'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Ναι, όλοι παρόντες'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true && mounted) {
+      await _submitAttendance(allPresent: true);
     }
   }
 
@@ -240,9 +434,12 @@ class _TakeAttendancePageState extends State<TakeAttendancePage> {
     }
   }
 
+  // ── UI ──────────────────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
-    final appBarColor = _hourlyOnly ? Colors.purple.shade700 : Colors.blue.shade700;
+    final appBarColor =
+        _hourlyOnly ? Colors.purple.shade700 : Colors.blue.shade700;
 
     return Scaffold(
       appBar: AppBar(
@@ -254,70 +451,194 @@ class _TakeAttendancePageState extends State<TakeAttendancePage> {
         backgroundColor: appBarColor,
         foregroundColor: Colors.white,
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : _students.isEmpty
-          ? const Center(child: Text('Δεν βρέθηκαν μαθητές για αυτό το τμήμα.'))
-          : Column(
-              children: [
-                if (_hourlyOnly)
-                  Container(
-                    width: double.infinity,
-                    color: Colors.purple.shade50,
-                    padding: const EdgeInsets.all(12),
-                    child: const Text(
-                      'Οι απουσίες έχουν ήδη υποβληθεί.\n'
-                      'Μπορείτε να καταχωρήσετε μόνο ωριαία απομάκρυνση για παρόντες μαθητές (χωρίς email).',
+      body: Stack(
+        children: [
+          _isLoading
+              ? const Center(child: CircularProgressIndicator())
+              : _students.isEmpty
+              ? const Center(
+                  child: Text('Δεν βρέθηκαν μαθητές για αυτό το τμήμα.'),
+                )
+              : Column(
+                  children: [
+                    if (_hourlyOnly)
+                      Container(
+                        width: double.infinity,
+                        color: Colors.purple.shade50,
+                        padding: const EdgeInsets.all(12),
+                        child: const Text(
+                          'Οι απουσίες έχουν ήδη υποβληθεί.\n'
+                          'Μπορείτε να καταχωρήσετε μόνο ωριαία απομάκρυνση για παρόντες μαθητές (χωρίς email).',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            color: Colors.purple,
+                          ),
+                        ),
+                      ),
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: _students.length,
+                        itemBuilder: (context, index) {
+                          final student = _students[index];
+                          if (_hourlyOnly) {
+                            return _buildHourlyOnlyTile(index, student);
+                          }
+                          return _buildFullAttendanceTile(index, student);
+                        },
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                      child: _hourlyOnly
+                          ? SizedBox(
+                              width: double.infinity,
+                              height: 54,
+                              child: ElevatedButton.icon(
+                                onPressed:
+                                    _isLoading ? null : _submitHourlyRemovals,
+                                icon: const Icon(
+                                  Icons.door_front_door,
+                                  color: Colors.white,
+                                ),
+                                label: const Text(
+                                  'Καταχώριση Ωριαίων Απομακρύνσεων',
+                                  style: TextStyle(
+                                    fontSize: 18,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.purple.shade700,
+                                ),
+                              ),
+                            )
+                          : Column(
+                              children: [
+                                SizedBox(
+                                  width: double.infinity,
+                                  height: 52,
+                                  child: OutlinedButton.icon(
+                                    onPressed:
+                                        _isLoading ? null : _confirmAllPresent,
+                                    icon: Icon(
+                                      Icons.done_all,
+                                      color: Colors.teal.shade800,
+                                    ),
+                                    label: Text(
+                                      'Όλοι παρόντες',
+                                      style: TextStyle(
+                                        fontSize: 17,
+                                        fontWeight: FontWeight.w700,
+                                        color: Colors.teal.shade800,
+                                      ),
+                                    ),
+                                    style: OutlinedButton.styleFrom(
+                                      side: BorderSide(
+                                        color: Colors.teal.shade700,
+                                        width: 2,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 10),
+                                SizedBox(
+                                  width: double.infinity,
+                                  height: 54,
+                                  child: ElevatedButton.icon(
+                                    onPressed: _isLoading
+                                        ? null
+                                        : () => _submitAttendance(
+                                              allPresent: false,
+                                            ),
+                                    icon: const Icon(
+                                      Icons.send,
+                                      color: Colors.white,
+                                    ),
+                                    label: const Text(
+                                      'Υποβολή Απουσιών',
+                                      style: TextStyle(
+                                        fontSize: 18,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.green.shade700,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                    ),
+                  ],
+                ),
+          if (_showSubmitReminder) _buildSubmitReminderOverlay(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSubmitReminderOverlay() {
+    return AnimatedBuilder(
+      animation: _flashController,
+      builder: (context, _) {
+        final flash = _flashController.value;
+        final bg = Color.lerp(
+          Colors.red.shade900.withValues(alpha: 0.88),
+          Colors.orange.shade800.withValues(alpha: 0.92),
+          flash,
+        )!;
+        return Positioned.fill(
+          child: Material(
+            color: bg,
+            child: SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      Icons.warning_amber_rounded,
+                      size: 88,
+                      color: Colors.white.withValues(alpha: 0.7 + 0.3 * flash),
+                    ),
+                    const SizedBox(height: 20),
+                    const Text(
+                      'Δεν έχετε προχωρήσει σε αποστολή των απόντων',
                       textAlign: TextAlign.center,
                       style: TextStyle(
-                        fontWeight: FontWeight.w600,
-                        color: Colors.purple,
-                      ),
-                    ),
-                  ),
-                Expanded(
-                  child: ListView.builder(
-                    itemCount: _students.length,
-                    itemBuilder: (context, index) {
-                      final student = _students[index];
-                      if (_hourlyOnly) {
-                        return _buildHourlyOnlyTile(index, student);
-                      }
-                      return _buildFullAttendanceTile(index, student);
-                    },
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: SizedBox(
-                    width: double.infinity,
-                    height: 54,
-                    child: ElevatedButton.icon(
-                      onPressed: _isLoading
-                          ? null
-                          : (_hourlyOnly
-                                ? _submitHourlyRemovals
-                                : _submitAttendance),
-                      icon: Icon(
-                        _hourlyOnly ? Icons.door_front_door : Icons.send,
                         color: Colors.white,
-                      ),
-                      label: Text(
-                        _hourlyOnly
-                            ? 'Καταχώριση Ωριαίων Απομακρύνσεων'
-                            : 'Υποβολή Απουσιών',
-                        style: const TextStyle(fontSize: 18, color: Colors.white),
-                      ),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _hourlyOnly
-                            ? Colors.purple.shade700
-                            : Colors.green.shade700,
+                        fontSize: 26,
+                        fontWeight: FontWeight.bold,
+                        height: 1.3,
                       ),
                     ),
-                  ),
+                    const SizedBox(height: 28),
+                    ElevatedButton(
+                      onPressed: _dismissSubmitReminder,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: Colors.red.shade900,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 28,
+                          vertical: 14,
+                        ),
+                      ),
+                      child: const Text(
+                        'Εντάξει',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
+          ),
+        );
+      },
     );
   }
 
@@ -334,7 +655,7 @@ class _TakeAttendancePageState extends State<TakeAttendancePage> {
       borderColor = Colors.purple;
     } else if (wasAlreadyAbsent) {
       statusLabel = student['isExcused'] == true
-          ? 'Ήδη απόν (δέσμευση) — δεν αλλάζει'
+          ? 'Δεσμευμένος (όχι απουσία) — δεν αλλάζει'
           : 'Ήδη απόν — δεν αλλάζει';
       borderColor = Colors.grey;
     } else if (isHourlyRemoval) {
@@ -401,7 +722,7 @@ class _TakeAttendancePageState extends State<TakeAttendancePage> {
       subtitleText = '🚪 Ωριαία απομάκρυνση (χωρίς email κηδεμόνα)';
     } else if (isAbsent && isExcused) {
       subtitleText =
-          '⚠️ Δεσμευμένος: ${student['excuseReason'] ?? "Χωρίς αιτιολογία"}';
+          'Δεσμευμένος (όχι απουσία): ${student['excuseReason'] ?? "Χωρίς αιτιολογία"}';
     } else if (student['guardianEmail'] != null &&
         student['guardianEmail'].toString().isNotEmpty) {
       subtitleText = student['guardianEmail'].toString();
@@ -457,6 +778,7 @@ class _TakeAttendancePageState extends State<TakeAttendancePage> {
                     _students[index]['excuseReason'] = null;
                   }
                 });
+                _onAbsenceSelectionChanged();
               },
             ),
             if (isAbsent) ...[
@@ -486,6 +808,7 @@ class _TakeAttendancePageState extends State<TakeAttendancePage> {
                       _students[index]['excuseReason'] = null;
                     }
                   });
+                  _onAbsenceSelectionChanged();
                 },
               ),
               if (!isHourlyRemoval)
@@ -499,6 +822,10 @@ class _TakeAttendancePageState extends State<TakeAttendancePage> {
                       color: Colors.orange,
                     ),
                   ),
+                  subtitle: const Text(
+                    'Δεν καταχωρείται απουσία και δεν στέλνεται email',
+                    style: TextStyle(fontSize: 12),
+                  ),
                   value: isExcused,
                   activeThumbColor: Colors.orange,
                   onChanged: (bool val) {
@@ -509,6 +836,7 @@ class _TakeAttendancePageState extends State<TakeAttendancePage> {
                         _students[index]['excuseReason'] = null;
                       }
                     });
+                    _onAbsenceSelectionChanged();
                   },
                 ),
               if (isExcused && !isHourlyRemoval)

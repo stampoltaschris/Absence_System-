@@ -31,7 +31,9 @@ Thumbs.db
 *.log
 **/local.properties
 
-# Local dumps / temp
+# Local dumps / temp (μπορεί να περιέχουν κωδικούς SMTP/users)
+absence_backend/backups/
+**/backups/*.sql
 **/all_code.txt
 **/all_flutter_code.txt
 **/_check_cols.js

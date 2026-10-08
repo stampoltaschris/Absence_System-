@@ -3,14 +3,15 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../core/school_schedule.dart';
+import '../../services/api_service.dart';
 import '../admin/admin_management_page.dart';
 import '../admin/admin_monitor_page.dart';
+import '../admin/admin_reports_page.dart';
 import '../admin/change_password_page.dart';
 import '../admin/email_settings_page.dart';
-import '../admin/schedule_settings_page.dart'; // 👉 Εισαγωγή της νέας οθόνης ρυθμίσεων ωραρίου
+import '../admin/schedule_settings_page.dart';
 import '../attendance/class_selection_page.dart';
 import '../auth/login_page.dart';
-import '../../services/api_service.dart';
 
 class DashboardPage extends StatefulWidget {
   final Map<String, dynamic> user;
@@ -59,6 +60,13 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
+  Future<void> _open(Widget page) {
+    return Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => page),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final bool isAdmin = (widget.user['role'] ?? '') == 'admin';
@@ -69,9 +77,70 @@ class _DashboardPageState extends State<DashboardPage> {
         .toString()
         .toUpperCase();
 
-    bool isOffTime =
+    final bool isOffTime =
         _currentHour.contains('Διάλειμμα') ||
         _currentHour == 'Εκτός Σχολικού Ωραρίου';
+
+    final tiles = <Widget>[
+      _buildMenuCard(
+        title: 'Καταχώριση Απουσιών',
+        icon: Icons.assignment_turned_in,
+        color: Colors.orange,
+        onTap: () => _open(const ClassSelectionPage()),
+      ),
+      if (!isAdmin)
+        _buildMenuCard(
+          title: 'Αλλαγή Κωδικού',
+          icon: Icons.password,
+          color: Colors.blue,
+          onTap: () => _open(ChangePasswordPage(user: widget.user)),
+        ),
+      if (isAdmin) ...[
+        _buildMenuCard(
+          title: 'Live Monitor',
+          icon: Icons.monitor,
+          color: Colors.indigo,
+          onTap: () => _open(const AdminMonitorPage()),
+        ),
+        _buildMenuCard(
+          title: 'Διαχείριση\nΤμημάτων / Μαθητών',
+          icon: Icons.groups,
+          color: Colors.green.shade700,
+          onTap: () => _open(AdminManagementPage(currentUser: widget.user)),
+        ),
+        _buildMenuCard(
+          title: 'Αναφορές',
+          icon: Icons.assessment,
+          color: Colors.teal,
+          onTap: () => _open(const AdminReportsPage()),
+        ),
+        _buildMenuCard(
+          title: 'Ωράριο &\nTest Mode',
+          icon: Icons.access_time,
+          color: Colors.deepOrange,
+          onTap: () {
+            _open(const ScheduleSettingsPage()).then((_) {
+              if (!mounted) return;
+              setState(() {
+                _currentHour = SchoolSchedule.getCurrentSchoolHour();
+              });
+            });
+          },
+        ),
+        _buildMenuCard(
+          title: 'Email Server',
+          icon: Icons.email,
+          color: Colors.purple,
+          onTap: () => _open(const EmailSettingsPage()),
+        ),
+        _buildMenuCard(
+          title: 'Αλλαγή Κωδικού',
+          icon: Icons.password,
+          color: Colors.blueGrey,
+          onTap: () => _open(ChangePasswordPage(user: widget.user)),
+        ),
+      ],
+    ];
 
     return Scaffold(
       appBar: AppBar(
@@ -91,7 +160,6 @@ class _DashboardPageState extends State<DashboardPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Κάρτα Καλωσορίσματος Χρήστη
             Card(
               elevation: 2,
               child: ListTile(
@@ -116,8 +184,6 @@ class _DashboardPageState extends State<DashboardPage> {
               ),
             ),
             const SizedBox(height: 20),
-
-            // 👉 ΣΤΑΘΕΡΟ ΠΛΑΙΣΙΟ ΕΜΦΑΝΙΣΗΣ ΤΡΕΧΟΥΣΑΣ ΔΙΔΑΚΤΙΚΗΣ ΩΡΑΣ
             Card(
               color: isOffTime ? Colors.red[50] : Colors.blue[50],
               shape: RoundedRectangleBorder(
@@ -167,184 +233,31 @@ class _DashboardPageState extends State<DashboardPage> {
                 ),
               ),
             ),
-            const SizedBox(height: 30),
-
-            const Text(
-              'Λειτουργίες',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            const SizedBox(height: 24),
+            Text(
+              isAdmin ? 'Λειτουργίες διαχειριστή' : 'Λειτουργίες',
+              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
             ),
-            const SizedBox(height: 10),
-
-            // Πλέγμα Επιλογών (Modules)
+            const SizedBox(height: 12),
             Expanded(
-              child: GridView.count(
-                crossAxisCount: 2,
-                crossAxisSpacing: 16,
-                mainAxisSpacing: 16,
-                children: [
-                  // 1. Καταχώριση Απουσιών
-                  _buildMenuCard(
-                    context,
-                    title: 'Καταχώριση Απουσιών',
-                    icon: Icons.assignment_turned_in,
-                    color: Colors.orange,
-                    onTap: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) => const ClassSelectionPage(),
-                        ),
-                      );
-                    },
-                  ),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  // Tablet landscape: 3 στήλες, αλλιώς 2
+                  final crossAxisCount = constraints.maxWidth >= 900
+                      ? 3
+                      : 2;
+                  final aspectRatio = constraints.maxWidth >= 900
+                      ? 1.35
+                      : 1.15;
 
-                  // 2. Αλλαγή Κωδικού (για Εκπαιδευτικούς)
-                  if (!isAdmin)
-                    _buildMenuCard(
-                      context,
-                      title: 'Αλλαγή Κωδικού',
-                      icon: Icons.password,
-                      color: Colors.blue,
-                      onTap: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (context) =>
-                                ChangePasswordPage(user: widget.user),
-                          ),
-                        );
-                      },
-                    ),
-
-                  // 3. Πάνελ Διαχειριστή (για Admin)
-                  if (isAdmin)
-                    _buildMenuCard(
-                      context,
-                      title: 'Πάνελ Διαχειριστή',
-                      icon: Icons.dashboard_customize,
-                      color: Colors.green,
-                      onTap: () {
-                        showModalBottomSheet(
-                          context: context,
-                          builder: (context) {
-                            return Container(
-                              padding: const EdgeInsets.all(20),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  ListTile(
-                                    leading: const Icon(
-                                      Icons.monitor,
-                                      color: Colors.green,
-                                    ),
-                                    title: const Text('Live Monitor Απουσιών'),
-                                    onTap: () {
-                                      Navigator.pop(context);
-                                      Navigator.push(
-                                        context,
-                                        MaterialPageRoute(
-                                          builder: (context) =>
-                                              const AdminMonitorPage(),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                  const Divider(),
-                                  ListTile(
-                                    leading: const Icon(
-                                      Icons.access_time,
-                                      color: Colors.green,
-                                    ),
-                                    title: const Text(
-                                      'Ρυθμίσεις Ωραρίου & Test Mode',
-                                    ),
-                                    onTap: () {
-                                      Navigator.pop(context);
-                                      Navigator.push(
-                                        context,
-                                        MaterialPageRoute(
-                                          builder: (context) =>
-                                              const ScheduleSettingsPage(),
-                                        ),
-                                      ).then((_) {
-                                        if (!mounted) return;
-                                        setState(() {
-                                          _currentHour =
-                                              SchoolSchedule.getCurrentSchoolHour();
-                                        });
-                                      });
-                                    },
-                                  ),
-                                  const Divider(),
-                                  ListTile(
-                                    leading: const Icon(
-                                      Icons.settings,
-                                      color: Colors.green,
-                                    ),
-                                    title: const Text(
-                                      'Διαχείριση Τμημάτων/Μαθητών/Εκπαιδευτικών',
-                                    ),
-                                    onTap: () {
-                                      Navigator.pop(context);
-                                      Navigator.push(
-                                        context,
-                                        MaterialPageRoute(
-                                          builder: (context) =>
-                                              AdminManagementPage(
-                                                currentUser: widget.user,
-                                              ),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                  const Divider(),
-                                  ListTile(
-                                    leading: const Icon(
-                                      Icons.password,
-                                      color: Colors.green,
-                                    ),
-                                    title: const Text(
-                                      'Αλλαγή Κωδικού Διαχειριστή',
-                                    ),
-                                    onTap: () {
-                                      Navigator.pop(context);
-                                      Navigator.push(
-                                        context,
-                                        MaterialPageRoute(
-                                          builder: (context) =>
-                                              ChangePasswordPage(
-                                                user: widget.user,
-                                              ),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                  const Divider(),
-                                  ListTile(
-                                    leading: const Icon(
-                                      Icons.email,
-                                      color: Colors.green,
-                                    ),
-                                    title: const Text('Ρυθμίσεις Email Server'),
-                                    onTap: () {
-                                      Navigator.pop(context);
-                                      Navigator.push(
-                                        context,
-                                        MaterialPageRoute(
-                                          builder: (context) =>
-                                              const EmailSettingsPage(),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                ],
-                              ),
-                            );
-                          },
-                        );
-                      },
-                    ),
-                ],
+                  return GridView.count(
+                    crossAxisCount: crossAxisCount,
+                    crossAxisSpacing: 16,
+                    mainAxisSpacing: 16,
+                    childAspectRatio: aspectRatio,
+                    children: tiles,
+                  );
+                },
               ),
             ),
           ],
@@ -353,30 +266,39 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  Widget _buildMenuCard(
-    BuildContext context, {
+  Widget _buildMenuCard({
     required String title,
     required IconData icon,
     required Color color,
     required VoidCallback onTap,
   }) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Card(
-        elevation: 3,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, size: 48, color: color),
-            const SizedBox(height: 12),
-            Text(
-              title,
-              textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-            ),
-          ],
+    return Material(
+      color: Colors.white,
+      elevation: 3,
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, size: 52, color: color),
+              const SizedBox(height: 14),
+              Text(
+                title,
+                textAlign: TextAlign.center,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  height: 1.2,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

@@ -23,6 +23,8 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
 
   List<Map<String, dynamic>> _classList = [];
   List<dynamic> _studentsInSelectedClass = [];
+  List<Map<String, dynamic>> _teachers = [];
+  bool _loadingTeachers = false;
   int? _selectedClassId;
   bool _hasSearched = false;
   bool _isImporting = false;
@@ -31,6 +33,7 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
   void initState() {
     super.initState();
     _loadClasses();
+    _loadTeachers();
   }
 
   @override
@@ -398,10 +401,28 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
     }
   }
 
+  Future<void> _loadTeachers() async {
+    setState(() => _loadingTeachers = true);
+    try {
+      final users = await ApiService.getAllUsers(role: 'teacher');
+      if (!mounted) return;
+      setState(() {
+        _teachers = users
+            .map((u) => Map<String, dynamic>.from(u as Map))
+            .toList();
+        _loadingTeachers = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _loadingTeachers = false);
+      debugPrint('❌ Σφάλμα φόρτωσης εκπαιδευτικών: $e');
+    }
+  }
+
   // 3. Προσθήκη Εκπαιδευτικού
   Future<void> _addUser() async {
     final name = _userNameController.text.trim();
-    final username = _userUsernameController.text.trim();
+    final username = _userUsernameController.text.trim().toLowerCase();
     final password = _userPasswordController.text.trim();
 
     if (name.isEmpty || username.isEmpty || password.isEmpty) {
@@ -411,7 +432,7 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
       return;
     }
 
-    final success = await ApiService.registerUser(
+    final result = await ApiService.registerUser(
       name: name,
       username: username,
       password: password,
@@ -420,23 +441,180 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
 
     if (!mounted) return;
 
-    if (success) {
+    if (result['success'] == true) {
       _userNameController.clear();
       _userUsernameController.clear();
       _userPasswordController.clear();
+      await _loadTeachers();
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Ο εκπαιδευτικός "$name" δημιουργήθηκε!'),
+          content: Text(result['message'] ?? 'Ο εκπαιδευτικός "$name" δημιουργήθηκε!'),
           backgroundColor: Colors.green,
         ),
       );
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Αποτυχία δημιουργίας εκπαιδευτικού.'),
+        SnackBar(
+          content: Text(result['message'] ?? 'Αποτυχία δημιουργίας εκπαιδευτικού.'),
           backgroundColor: Colors.red,
         ),
       );
+    }
+  }
+
+  Future<void> _editTeacher(Map<String, dynamic> teacher) async {
+    final id = teacher['id'] is int
+        ? teacher['id'] as int
+        : int.tryParse('${teacher['id']}') ?? 0;
+    if (id == 0) return;
+
+    final nameController = TextEditingController(
+      text: teacher['name']?.toString() ?? '',
+    );
+    final usernameController = TextEditingController(
+      text: teacher['username']?.toString() ?? '',
+    );
+    final passwordController = TextEditingController();
+
+    final bool? saved = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Επεξεργασία Εκπαιδευτικού'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nameController,
+                  decoration: const InputDecoration(
+                    labelText: 'Ονοματεπώνυμο',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: usernameController,
+                  decoration: const InputDecoration(
+                    labelText: 'Username',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: passwordController,
+                  obscureText: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Νέος κωδικός (προαιρετικά)',
+                    hintText: 'Άδειο = χωρίς αλλαγή',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Ακύρωση'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Αποθήκευση'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (saved != true) {
+      nameController.dispose();
+      usernameController.dispose();
+      passwordController.dispose();
+      return;
+    }
+
+    final name = nameController.text.trim();
+    final username = usernameController.text.trim().toLowerCase();
+    final password = passwordController.text.trim();
+    nameController.dispose();
+    usernameController.dispose();
+    passwordController.dispose();
+
+    if (name.isEmpty || username.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Όνομα και username είναι υποχρεωτικά.')),
+      );
+      return;
+    }
+
+    final result = await ApiService.updateUser(
+      userId: id,
+      name: name,
+      username: username,
+      password: password.isEmpty ? null : password,
+    );
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(result['message'] ?? ''),
+        backgroundColor:
+            result['success'] == true ? Colors.green : Colors.red,
+      ),
+    );
+    if (result['success'] == true) {
+      await _loadTeachers();
+    }
+  }
+
+  Future<void> _deleteTeacher(Map<String, dynamic> teacher) async {
+    final id = teacher['id'] is int
+        ? teacher['id'] as int
+        : int.tryParse('${teacher['id']}') ?? 0;
+    final name = teacher['name']?.toString() ?? '';
+    if (id == 0) return;
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Διαγραφή Εκπαιδευτικού'),
+        content: Text(
+          'Θέλετε να διαγράψετε τον/την "$name";\n\n'
+          'Θα διαγραφούν και οι σχετικές καταχωρίσεις απουσιών που υπέβαλε.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Ακύρωση'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text(
+              'Διαγραφή',
+              style: TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    final result = await ApiService.deleteUser(id);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(result['message'] ?? ''),
+        backgroundColor:
+            result['success'] == true ? Colors.green : Colors.red,
+      ),
+    );
+    if (result['success'] == true) {
+      await _loadTeachers();
     }
   }
 
@@ -833,6 +1011,7 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
             Padding(
               padding: const EdgeInsets.all(24.0),
               child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   TextField(
                     controller: _userNameController,
@@ -841,7 +1020,7 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
                       border: OutlineInputBorder(),
                     ),
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 12),
                   TextField(
                     controller: _userUsernameController,
                     decoration: const InputDecoration(
@@ -849,7 +1028,7 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
                       border: OutlineInputBorder(),
                     ),
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 12),
                   TextField(
                     controller: _userPasswordController,
                     obscureText: true,
@@ -858,11 +1037,97 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
                       border: OutlineInputBorder(),
                     ),
                   ),
-                  const SizedBox(height: 16),
-                  ElevatedButton.icon(
-                    onPressed: _addUser,
-                    icon: const Icon(Icons.how_to_reg),
-                    label: const Text('Δημιουργία Λογαριασμού'),
+                  const SizedBox(height: 12),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: ElevatedButton.icon(
+                      onPressed: _addUser,
+                      icon: const Icon(Icons.how_to_reg),
+                      label: const Text('Δημιουργία Λογαριασμού'),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Εγγεγραμμένοι Εκπαιδευτικοί',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Ανανέωση',
+                        onPressed: _loadingTeachers ? null : _loadTeachers,
+                        icon: _loadingTeachers
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.refresh),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Expanded(
+                    child: _loadingTeachers && _teachers.isEmpty
+                        ? const Center(child: CircularProgressIndicator())
+                        : _teachers.isEmpty
+                        ? const Center(
+                            child: Text(
+                              'Δεν υπάρχουν εγγεγραμμένοι εκπαιδευτικοί.',
+                            ),
+                          )
+                        : ListView.builder(
+                            itemCount: _teachers.length,
+                            itemBuilder: (context, index) {
+                              final t = _teachers[index];
+                              final name = t['name']?.toString() ?? '';
+                              final username = t['username']?.toString() ?? '';
+                              return Card(
+                                child: ListTile(
+                                  leading: CircleAvatar(
+                                    backgroundColor: Colors.green.shade100,
+                                    child: Icon(
+                                      Icons.badge,
+                                      color: Colors.green.shade800,
+                                    ),
+                                  ),
+                                  title: Text(
+                                    name,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                  subtitle: Text('@$username'),
+                                  trailing: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      IconButton(
+                                        tooltip: 'Επεξεργασία',
+                                        icon: const Icon(
+                                          Icons.edit,
+                                          color: Colors.blue,
+                                        ),
+                                        onPressed: () => _editTeacher(t),
+                                      ),
+                                      IconButton(
+                                        tooltip: 'Διαγραφή',
+                                        icon: const Icon(
+                                          Icons.delete,
+                                          color: Colors.red,
+                                        ),
+                                        onPressed: () => _deleteTeacher(t),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
                   ),
                 ],
               ),

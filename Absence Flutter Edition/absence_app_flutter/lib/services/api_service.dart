@@ -121,12 +121,15 @@ class ApiService {
     }
   }
 
-  static Future<List<dynamic>> getAllUsers() async {
+  static Future<List<dynamic>> getAllUsers({String? role}) async {
     try {
       final baseUrl = await getBaseUrl();
       final headers = await _getHeaders();
+      final roleQuery = (role != null && role.isNotEmpty)
+          ? '?role=${Uri.encodeComponent(role)}'
+          : '';
       final response = await http
-          .get(Uri.parse('$baseUrl/auth/users'), headers: headers)
+          .get(Uri.parse('$baseUrl/auth/users$roleQuery'), headers: headers)
           .timeout(const Duration(seconds: 5));
 
       if (response.statusCode == 200) {
@@ -138,7 +141,7 @@ class ApiService {
     }
   }
 
-  static Future<bool> registerUser({
+  static Future<Map<String, dynamic>> registerUser({
     required String name,
     required String username,
     required String password,
@@ -158,10 +161,98 @@ class ApiService {
         }),
       );
 
-      return response.statusCode == 200 || response.statusCode == 201;
+      final data = response.body.isNotEmpty ? jsonDecode(response.body) : {};
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        return {
+          'success': true,
+          'message': data is Map
+              ? (data['message'] ?? 'Ο λογαριασμός δημιουργήθηκε.')
+              : 'Ο λογαριασμός δημιουργήθηκε.',
+          'user': data is Map ? data['user'] ?? data : null,
+        };
+      }
+      return {
+        'success': false,
+        'message': data is Map
+            ? (data['message'] ?? 'Αποτυχία δημιουργίας.')
+            : 'Αποτυχία δημιουργίας.',
+      };
     } catch (e) {
       print('❌ Σφάλμα registerUser: $e');
-      return false;
+      return {'success': false, 'message': 'Σφάλμα σύνδεσης με τον server.'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> updateUser({
+    required int userId,
+    required String name,
+    required String username,
+    String? password,
+  }) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final body = <String, dynamic>{
+        'name': name,
+        'username': username,
+      };
+      if (password != null && password.trim().isNotEmpty) {
+        body['password'] = password.trim();
+      }
+
+      final response = await http.put(
+        Uri.parse('$baseUrl/auth/users/$userId'),
+        headers: headers,
+        body: jsonEncode(body),
+      );
+
+      final data = response.body.isNotEmpty ? jsonDecode(response.body) : {};
+      if (response.statusCode == 200) {
+        return {
+          'success': true,
+          'message': data is Map
+              ? (data['message'] ?? 'Ενημερώθηκε.')
+              : 'Ενημερώθηκε.',
+          'user': data is Map ? data['user'] : null,
+        };
+      }
+      return {
+        'success': false,
+        'message': data is Map
+            ? (data['message'] ?? 'Αποτυχία ενημέρωσης.')
+            : 'Αποτυχία ενημέρωσης.',
+      };
+    } catch (e) {
+      return {'success': false, 'message': 'Σφάλμα σύνδεσης με τον server.'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> deleteUser(int userId) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http.delete(
+        Uri.parse('$baseUrl/auth/users/$userId'),
+        headers: headers,
+      );
+
+      final data = response.body.isNotEmpty ? jsonDecode(response.body) : {};
+      if (response.statusCode == 200) {
+        return {
+          'success': true,
+          'message': data is Map
+              ? (data['message'] ?? 'Διαγράφηκε.')
+              : 'Διαγράφηκε.',
+        };
+      }
+      return {
+        'success': false,
+        'message': data is Map
+            ? (data['message'] ?? 'Αποτυχία διαγραφής.')
+            : 'Αποτυχία διαγραφής.',
+      };
+    } catch (e) {
+      return {'success': false, 'message': 'Σφάλμα σύνδεσης με τον server.'};
     }
   }
 
@@ -253,19 +344,40 @@ class ApiService {
     }
   }
 
-  static Future<void> unlockClass(String className) async {
+  static Future<Map<String, dynamic>> unlockClass(
+    String className, {
+    String? currentHour,
+  }) async {
     try {
       final baseUrl = await getBaseUrl();
       final headers = await _getHeaders();
-      await http
+      final body = <String, dynamic>{'className': className};
+      if (currentHour != null && currentHour.isNotEmpty) {
+        body['currentHour'] = currentHour;
+      }
+
+      final response = await http
           .post(
             Uri.parse('$baseUrl/school/unlock-class'),
             headers: headers,
-            body: jsonEncode({'className': className}),
+            body: jsonEncode(body),
           )
           .timeout(const Duration(seconds: 5));
+
+      final data = response.body.isNotEmpty
+          ? jsonDecode(response.body)
+          : <String, dynamic>{};
+      return {
+        'success': response.statusCode == 200,
+        'message': data is Map
+            ? (data['message'] ?? '')
+            : '',
+      };
     } catch (e) {
-      // Ignored
+      return {
+        'success': false,
+        'message': 'Σφάλμα δικτύου κατά την αποδέσμευση',
+      };
     }
   }
 

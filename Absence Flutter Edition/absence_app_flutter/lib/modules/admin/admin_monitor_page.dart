@@ -72,6 +72,8 @@ class _AdminMonitorPageState extends State<AdminMonitorPage> {
                 final String hour = item['hour'] ?? '';
                 final String teacher = item['teacherName'] ?? 'Άγνωστος';
                 final List<dynamic> absents = item['absentStudents'] ?? [];
+                final List<dynamic> reserved =
+                    item['reservedStudents'] ?? [];
 
                 return Card(
                   elevation: 3,
@@ -141,7 +143,7 @@ class _AdminMonitorPageState extends State<AdminMonitorPage> {
                         const SizedBox(height: 4),
                         absents.isEmpty
                             ? const Text(
-                                '• Κανένας απόντας (Όλοι παρόντες)',
+                                '• Κανένας απόντας',
                                 style: TextStyle(
                                   color: Colors.green,
                                   fontStyle: FontStyle.italic,
@@ -166,6 +168,34 @@ class _AdminMonitorPageState extends State<AdminMonitorPage> {
                                     )
                                     .toList(),
                               ),
+                        if (reserved.isNotEmpty) ...[
+                          const SizedBox(height: 12),
+                          const Text(
+                            'Δεσμευμένοι (χωρίς απουσία):',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.black,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: reserved
+                                .map(
+                                  (student) => Padding(
+                                    padding: const EdgeInsets.only(top: 2.0),
+                                    child: Text(
+                                      '• $student',
+                                      style: TextStyle(
+                                        color: Colors.orange.shade800,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ),
+                                )
+                                .toList(),
+                          ),
+                        ],
                       ],
                     ),
                   ),

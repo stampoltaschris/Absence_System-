@@ -130,18 +130,26 @@ router.post('/submit', async (req, res) => {
   let targetDate = new Date().toISOString().split('T')[0];
 
   if (!listToProcess && absences && Array.isArray(absences)) {
-    listToProcess = absences.map(abs => ({
-      student_id: abs.studentId || abs.student_id,
-      class_name: className,
-      hour: period,
-      is_absent: abs.absent === true || abs.isAbsent === true || abs.is_absent === 1 ? 1 : 0,
-      is_excused: abs.isExcused === true || abs.is_excused === true || false,
-      is_hourly_removal:
-        abs.isHourlyRemoval === true || abs.is_hourly_removal === true || false,
-      excused_by_teacher_id: abs.excusedByTeacherId || abs.excused_by_teacher_id || null,
-      excuse_reason: abs.excuseReason || abs.excuse_reason || null,
-      date: targetDate
-    }));
+    listToProcess = absences.map(abs => {
+      const isExcused = abs.isExcused === true || abs.is_excused === true || false;
+      const isHourly =
+        abs.isHourlyRemoval === true || abs.is_hourly_removal === true || false;
+      const markedAbsent =
+        abs.absent === true || abs.isAbsent === true || abs.is_absent === 1;
+      // Δέσμευση από άλλον καθηγητή: ΔΕΝ καταχωρείται ως απουσία
+      const isAbsent = isHourly ? 1 : (isExcused ? 0 : (markedAbsent ? 1 : 0));
+      return {
+        student_id: abs.studentId || abs.student_id,
+        class_name: className,
+        hour: period,
+        is_absent: isAbsent,
+        is_excused: isExcused && !isHourly,
+        is_hourly_removal: isHourly,
+        excused_by_teacher_id: abs.excusedByTeacherId || abs.excused_by_teacher_id || null,
+        excuse_reason: abs.excuseReason || abs.excuse_reason || null,
+        date: targetDate
+      };
+    });
   }
 
   if (listToProcess && listToProcess.length > 0) {
@@ -253,16 +261,22 @@ router.post('/submit', async (req, res) => {
       const hour = record.hour || record.school_hour || record.schoolHour || targetPeriod || '1η ώρα';
       
       const isAbsentRaw = record.is_absent !== undefined ? record.is_absent : (record.isAbsent !== undefined ? record.isAbsent : record.absent);
-      const isAbsent = (isAbsentRaw === true || isAbsentRaw === 1 || isAbsentRaw === 'true') ? 1 : 0;
-      // Ωριαία απομάκρυνση: απών, χωρίς email, καταγράφεται ο τρέχων εκπαιδευτικός
-      const isHourlyRemoval =
-        (record.is_hourly_removal === true || record.isHourlyRemoval === true) &&
-        isAbsent === 1;
-      // Δέσμευση από άλλον — αποκλείεται αν υπάρχει ωριαία απομάκρυνση
-      const isExcusedBool =
-        !isHourlyRemoval &&
-        (record.is_excused === true || record.isExcused === true) &&
-        isAbsent === 1;
+      let isAbsent = (isAbsentRaw === true || isAbsentRaw === 1 || isAbsentRaw === 'true') ? 1 : 0;
+      const wantsHourly =
+        record.is_hourly_removal === true || record.isHourlyRemoval === true;
+      const wantsExcused =
+        record.is_excused === true || record.isExcused === true;
+
+      // Ωριαία απομάκρυνση: απών, χωρίς email
+      const isHourlyRemoval = wantsHourly && !wantsExcused;
+      // Δέσμευση από άλλον καθηγητή: σημείωση στη βάση, ΟΧΙ απουσία, ΟΧΙ email
+      const isExcusedBool = wantsExcused && !isHourlyRemoval;
+
+      if (isHourlyRemoval) {
+        isAbsent = 1;
+      } else if (isExcusedBool) {
+        isAbsent = 0;
+      }
       
       let excusedByTeacherId = null;
       if (isExcusedBool) {
@@ -275,10 +289,12 @@ router.post('/submit', async (req, res) => {
         : (isExcusedBool ? (record.excuse_reason || record.excuseReason || 'Δεσμευμένος') : null);
       let emailStatus = 'PRESENT';
 
-      if (isAbsent === 1 && isHourlyRemoval) {
-        // Δεν αποστέλλεται email στον κηδεμόνα
+      if (isHourlyRemoval) {
         emailStatus = 'HOURLY_SKIPPED';
-      } else if (isAbsent === 1 && !isExcusedBool) {
+      } else if (isExcusedBool) {
+        // Καταχωρείται μόνο η δέσμευση — όχι απουσία, όχι email
+        emailStatus = 'RESERVED_NO_ABSENCE';
+      } else if (isAbsent === 1) {
         if (!transporter) {
           emailStatus = 'FAILED';
         } else {
@@ -298,13 +314,11 @@ router.post('/submit', async (req, res) => {
               });
 
             emailTasks.push(mailPromise);
-            emailStatus = 'SENT'; // Η πραγματική κατάσταση θα ολοκληρωθεί στο background
+            emailStatus = 'SENT';
           } else {
             emailStatus = 'FAILED';
           }
         }
-      } else if (isAbsent === 1 && isExcusedBool) {
-        emailStatus = 'EXCUSED_SKIPPED';
       }
 
       recordsToInsert.push({
@@ -621,16 +635,19 @@ router.get('/daily-summary', async (req, res) => {
           hour: row.hour,
           teacherName: row.teacher_name || 'Άγνωστος Εκπαιδευτικός',
           absentStudents: [],
+          reservedStudents: [],
           totalStudents: 0
         };
       }
       summaryMap[key].totalStudents += 1;
-      if (row.is_absent === 1 || row.is_absent === true) {
+      if (row.is_excused && !(row.is_absent === 1 || row.is_absent === true)) {
+        summaryMap[key].reservedStudents.push(
+          `${row.student_name}${row.excuse_reason ? ' (' + row.excuse_reason + ')' : ''}`
+        );
+      } else if (row.is_absent === 1 || row.is_absent === true) {
         let studentText = row.student_name;
         if (row.is_hourly_removal) {
           studentText += ' (Ωριαία απομάκρυνση)';
-        } else if (row.is_excused) {
-          studentText += ` (Δεσμευμένος${row.excuse_reason ? ': ' + row.excuse_reason : ''})`;
         }
         summaryMap[key].absentStudents.push(studentText);
       }

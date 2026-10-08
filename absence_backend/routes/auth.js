@@ -128,6 +128,7 @@ router.post('/change-password', authenticateToken, async (req, res) => {
 // ==========================================
 // GET /api/auth/users
 // (Προστατευμένο - Μόνο Admin)
+// Query: ?role=teacher (προαιρετικό φίλτρο)
 // ==========================================
 router.get('/users', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
@@ -135,7 +136,18 @@ router.get('/users', authenticateToken, async (req, res) => {
   }
 
   try {
-    const result = await db.query('SELECT id, name, username, role FROM users ORDER BY name ASC');
+    const roleFilter = (req.query.role || '').toString().trim().toLowerCase();
+    let result;
+    if (roleFilter === 'teacher' || roleFilter === 'admin') {
+      result = await db.query(
+        'SELECT id, name, username, role, is_first_login FROM users WHERE role = $1 ORDER BY name ASC',
+        [roleFilter]
+      );
+    } else {
+      result = await db.query(
+        'SELECT id, name, username, role, is_first_login FROM users ORDER BY name ASC'
+      );
+    }
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -157,21 +169,145 @@ router.post('/users', authenticateToken, async (req, res) => {
     return res.status(400).json({ message: 'Συμπληρώστε όλα τα απαραίτητα πεδία για τον χρήστη.' });
   }
 
+  const normalizedRole = String(role).toLowerCase();
+  if (normalizedRole !== 'teacher' && normalizedRole !== 'admin') {
+    return res.status(400).json({ message: 'Μη έγκυρος ρόλος χρήστη.' });
+  }
+
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const result = await db.query(
-      'INSERT INTO users (name, username, password, role) VALUES ($1, $2, $3, $4) RETURNING id, name, username, role',
-      [name, username, hashedPassword, role]
+      'INSERT INTO users (name, username, password, role, is_first_login) VALUES ($1, $2, $3, $4, TRUE) RETURNING id, name, username, role, is_first_login',
+      [name.trim(), username.trim().toLowerCase(), hashedPassword, normalizedRole]
     );
     
-    console.log(`👤 [ADMIN] Δημιουργήθηκε νέος χρήστης: ${username} (${role})`);
-    res.json(result.rows[0]);
+    console.log(`👤 [ADMIN] Δημιουργήθηκε νέος χρήστης: ${username} (${normalizedRole})`);
+    res.json({ success: true, user: result.rows[0], message: 'Ο λογαριασμός δημιουργήθηκε.' });
   } catch (err) {
     if (err.code === '23505') { // PostgreSQL unique violation error code
-      return res.status(400).json({ message: 'Το username χρησιμοποιείται ήδη.' });
+      return res.status(400).json({ success: false, message: 'Το username χρησιμοποιείται ήδη.' });
     }
-    res.status(500).json({ message: err.message });
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ==========================================
+// PUT /api/auth/users/:id
+// Ενημέρωση εκπαιδευτικού (όνομα / username / προαιρετικά κωδικός)
+// ==========================================
+router.put('/users/:id', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, message: 'Απαγορεύεται η πρόσβαση. Απαιτούνται δικαιώματα διαχειριστή.' });
+  }
+
+  const userId = parseInt(req.params.id, 10);
+  const { name, username, password } = req.body;
+
+  if (isNaN(userId)) {
+    return res.status(400).json({ success: false, message: 'Μη έγκυρο ID χρήστη.' });
+  }
+  if (!name || !username) {
+    return res.status(400).json({ success: false, message: 'Απαιτούνται ονοματεπώνυμο και username.' });
+  }
+
+  try {
+    const existing = await db.query('SELECT id, role FROM users WHERE id = $1', [userId]);
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Ο χρήστης δεν βρέθηκε.' });
+    }
+
+    // Από αυτό το CRUD επιτρέπουμε επεξεργασία μόνο εκπαιδευτικών
+    if (existing.rows[0].role !== 'teacher') {
+      return res.status(403).json({
+        success: false,
+        message: 'Από εδώ επεξεργάζονται μόνο λογαριασμοί εκπαιδευτικών.',
+      });
+    }
+
+    const cleanName = String(name).trim();
+    const cleanUsername = String(username).trim().toLowerCase();
+    const newPassword = password != null ? String(password).trim() : '';
+
+    let result;
+    if (newPassword.length > 0) {
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      result = await db.query(
+        `UPDATE users
+         SET name = $1, username = $2, password = $3, is_first_login = TRUE
+         WHERE id = $4 AND role = 'teacher'
+         RETURNING id, name, username, role, is_first_login`,
+        [cleanName, cleanUsername, hashedPassword, userId]
+      );
+    } else {
+      result = await db.query(
+        `UPDATE users
+         SET name = $1, username = $2
+         WHERE id = $3 AND role = 'teacher'
+         RETURNING id, name, username, role, is_first_login`,
+        [cleanName, cleanUsername, userId]
+      );
+    }
+
+    console.log(`✏️ [ADMIN] Ενημερώθηκε εκπαιδευτικός id=${userId} (${cleanUsername})`);
+    res.json({ success: true, user: result.rows[0], message: 'Ο εκπαιδευτικός ενημερώθηκε.' });
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(400).json({ success: false, message: 'Το username χρησιμοποιείται ήδη.' });
+    }
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ==========================================
+// DELETE /api/auth/users/:id
+// Διαγραφή εκπαιδευτικού (όχι admin / όχι τον εαυτό σου)
+// ==========================================
+router.delete('/users/:id', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, message: 'Απαγορεύεται η πρόσβαση. Απαιτούνται δικαιώματα διαχειριστή.' });
+  }
+
+  const userId = parseInt(req.params.id, 10);
+  if (isNaN(userId)) {
+    return res.status(400).json({ success: false, message: 'Μη έγκυρο ID χρήστη.' });
+  }
+
+  if (req.user.id === userId) {
+    return res.status(400).json({ success: false, message: 'Δεν μπορείτε να διαγράψετε τον δικό σας λογαριασμό.' });
+  }
+
+  try {
+    const existing = await db.query(
+      'SELECT id, name, username, role FROM users WHERE id = $1',
+      [userId]
+    );
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Ο χρήστης δεν βρέθηκε.' });
+    }
+
+    const target = existing.rows[0];
+    if (target.role !== 'teacher') {
+      return res.status(403).json({
+        success: false,
+        message: 'Δεν επιτρέπεται η διαγραφή λογαριασμού διαχειριστή από εδώ.',
+      });
+    }
+
+    // Καθαρισμός τυχόν ενεργών locks του εκπαιδευτικού
+    await db.query('DELETE FROM class_locks WHERE user_id = $1', [userId]);
+
+    // attendance.teacher_id έχει ON DELETE CASCADE
+    await db.query(`DELETE FROM users WHERE id = $1 AND role = 'teacher'`, [userId]);
+
+    console.log(`🗑️ [ADMIN] Διαγράφηκε εκπαιδευτικός: ${target.username} (id=${userId})`);
+    res.json({
+      success: true,
+      message: `Ο εκπαιδευτικός "${target.name}" διαγράφηκε.`,
+    });
+  } catch (err) {
+    console.error('❌ [DELETE USER ERROR]:', err.message);
+    res.status(500).json({ success: false, message: err.message });
   }
 });
 

@@ -171,6 +171,57 @@ class _ClassSelectionPageState extends State<ClassSelectionPage> {
     }
   }
 
+  /// Μόνο admin: αναγκαστική αποδέσμευση τμήματος (όλες οι ώρες).
+  Future<void> _adminForceUnlock(String className, String? lockedBy) async {
+    if (!_isAdmin) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Ξεκλείδωμα τμήματος'),
+        content: Text(
+          'Να αποδεσμευτεί το τμήμα $className'
+          '${lockedBy != null ? " (σε χρήση από $lockedBy)" : ""};\n\n'
+          'Μόνο ο διαχειριστής μπορεί να το κάνει.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Άκυρο'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.orange),
+            child: const Text('Ξεκλείδωμα'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _isLoading = true);
+    // Χωρίς currentHour → admin καθαρίζει όλα τα locks του τμήματος
+    final result = await ApiService.unlockClass(className);
+    if (!mounted) return;
+    setState(() => _isLoading = false);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          result['success'] == true
+              ? 'Το τμήμα $className αποδεσμεύτηκε.'
+              : (result['message'] ?? 'Αποτυχία ξεκλειδώματος'),
+        ),
+        backgroundColor: result['success'] == true ? Colors.green : Colors.red,
+      ),
+    );
+
+    if (result['success'] == true) {
+      await _fetchClasses(showLoading: false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     // Admin ή forceTestMode: δεν μπλοκάρουμε την οθόνη εκτός ωραρίου
@@ -249,26 +300,51 @@ class _ClassSelectionPageState extends State<ClassSelectionPage> {
                       submittedByTeacherId: submittedByTeacherId,
                       lockedByUserId: lockedByUserId,
                     ),
-                    child: Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text(
-                            className,
-                            style: TextStyle(
-                              fontSize: 22,
-                              fontWeight: FontWeight.bold,
-                              color: textColor,
+                    child: Stack(
+                      children: [
+                        Center(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Text(
+                                  className,
+                                  style: TextStyle(
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.bold,
+                                    color: textColor,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  statusText,
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    color: textColor,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
-                          const SizedBox(height: 4),
-                          Text(
-                            statusText,
-                            textAlign: TextAlign.center,
-                            style: TextStyle(color: textColor, fontSize: 12),
+                        ),
+                        // Μόνο admin: ξεκλείδωμα «κολλημένου» τμήματος
+                        if (_isAdmin && isLocked && !isSubmitted)
+                          Positioned(
+                            top: 4,
+                            right: 4,
+                            child: IconButton(
+                              tooltip: 'Ξεκλείδωμα (μόνο διαχειριστής)',
+                              icon: Icon(
+                                Icons.lock_open,
+                                color: Colors.orange.shade900,
+                              ),
+                              onPressed: () =>
+                                  _adminForceUnlock(className, lockedBy),
+                            ),
                           ),
-                        ],
-                      ),
+                      ],
                     ),
                   ),
                 );
