@@ -1,0 +1,31 @@
+name: absence_app_flutter
+description: "Σχολική εφαρμογή καταγραφής απουσιών για Android Tablet"
+publish_to: 'none'
+
+version: 1.0.1+2
+
+environment:
+  sdk: ^3.13.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+  audioplayers: ^6.0.0 # 👈 Προσθήκη για αναπαραγωγή ήχου
+
+  cupertino_icons: ^1.0.8
+  http: ^1.2.2
+  shared_preferences: ^2.3.2
+  file_picker: ^13.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+# Δήλωση των assets:
+  assets:
+    - assets/audio/
+    - assets/images/

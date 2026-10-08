@@ -1,0 +1,47 @@
+# Secrets
+.env
+**/.env
+**/.env.*
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Flutter / Dart
+**/.dart_tool/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/build/
+**/Flutter/ephemeral/
+**/ios/Flutter/ephemeral/
+**/macos/Flutter/ephemeral/
+**/windows/flutter/ephemeral/
+**/linux/flutter/ephemeral/
+**/Pods/
+**/.packages
+**/.metadata
+
+# IDE / OS
+**/.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+*.swp
+*.log
+**/local.properties
+
+# Local dumps / temp
+**/all_code.txt
+**/all_flutter_code.txt
+**/_check_cols.js
+**/full_code*.txt
+absence_backend/test_db.js
+Absence Flutter Edition/.git.bak_nested/
+
+# Coverage / misc
+coverage/
+*.lcov
+*.env
+**/*.env
+!absence_backend/.env.example

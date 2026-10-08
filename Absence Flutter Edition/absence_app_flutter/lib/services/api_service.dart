@@ -1,0 +1,679 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+
+class ApiService {
+  static const String defaultServerIp = '192.168.1.16:5000';
+
+  // --- CONFIGURATION & HELPERS ---
+  static Future<String> getBaseUrl() async {
+    final prefs = await SharedPreferences.getInstance();
+    String savedIp = prefs.getString('server_ip') ?? defaultServerIp;
+    savedIp = savedIp.trim();
+
+    if (savedIp.isEmpty) {
+      savedIp = defaultServerIp;
+    }
+
+    if (!savedIp.startsWith('http://') && !savedIp.startsWith('https://')) {
+      savedIp = 'http://$savedIp';
+    }
+
+    if (savedIp.endsWith('/')) {
+      savedIp = savedIp.substring(0, savedIp.length - 1);
+    }
+
+    if (!savedIp.endsWith('/api')) {
+      savedIp = '$savedIp/api';
+    }
+
+    return savedIp;
+  }
+
+  static Future<Map<String, String>> _getHeaders() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('jwt_token') ?? '';
+    return {
+      'Content-Type': 'application/json',
+      if (token.isNotEmpty) 'Authorization': 'Bearer $token',
+    };
+  }
+
+  static Future<String> getServerIp() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('server_ip') ?? defaultServerIp;
+  }
+
+  static Future<void> setServerIp(String newIp) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('server_ip', newIp.trim());
+  }
+
+  // --- 1. AUTHENTICATION & USERS ---
+  static Future<Map<String, dynamic>> login(
+    String username,
+    String password,
+  ) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/auth/login'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'username': username, 'password': password}),
+          )
+          .timeout(const Duration(seconds: 5));
+
+      final data = jsonDecode(response.body);
+
+      if (response.statusCode == 200) {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('jwt_token', data['token'] ?? '');
+        await prefs.setString('username', data['user']['username'] ?? '');
+        await prefs.setString('user_role', data['user']['role'] ?? '');
+        await prefs.setInt('user_id', data['user']['id'] ?? 1);
+
+        return {'success': true, 'user': data['user']};
+      } else {
+        return {
+          'success': false,
+          'message': data['message'] ?? 'Λανθασμένα στοιχεία σύνδεσης.',
+        };
+      }
+    } catch (e) {
+      return {'success': false, 'message': 'Σφάλμα σύνδεσης με τον Server.'};
+    }
+  }
+
+  static Future<void> logout() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('jwt_token');
+    await prefs.remove('username');
+    await prefs.remove('user_role');
+    await prefs.remove('user_id');
+  }
+
+  static Future<bool> changePassword({
+    required int userId,
+    required String currentPassword,
+    required String newPassword,
+  }) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/auth/change-password'),
+            headers: headers,
+            body: jsonEncode({
+              'userId': userId,
+              'oldPassword': currentPassword,
+              'newPassword': newPassword,
+            }),
+          )
+          .timeout(const Duration(seconds: 5));
+
+      return response.statusCode == 200;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  static Future<List<dynamic>> getAllUsers() async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .get(Uri.parse('$baseUrl/auth/users'), headers: headers)
+          .timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as List;
+      }
+      return [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  static Future<bool> registerUser({
+    required String name,
+    required String username,
+    required String password,
+    required String role,
+  }) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http.post(
+        Uri.parse('$baseUrl/auth/users'),
+        headers: headers,
+        body: jsonEncode({
+          'name': name,
+          'username': username,
+          'password': password,
+          'role': role,
+        }),
+      );
+
+      return response.statusCode == 200 || response.statusCode == 201;
+    } catch (e) {
+      print('❌ Σφάλμα registerUser: $e');
+      return false;
+    }
+  }
+
+  // --- 2. SCHOOL & CLASSES ---
+  static Future<List<dynamic>> getClasses([
+    String currentHour = '1η ώρα',
+  ]) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .get(
+            Uri.parse(
+              '$baseUrl/school/classes?currentHour=${Uri.encodeComponent(currentHour)}',
+            ),
+            headers: headers,
+          )
+          .timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data is List) return data;
+      }
+      return [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  static Future<bool> insertClass(String className) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/school/classes'),
+            headers: headers,
+            body: jsonEncode({'name': className}),
+          )
+          .timeout(const Duration(seconds: 5));
+      return response.statusCode == 200 || response.statusCode == 201;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  static Future<bool> deleteClass(int id) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .delete(Uri.parse('$baseUrl/school/classes/$id'), headers: headers)
+          .timeout(const Duration(seconds: 5));
+      return response.statusCode == 200;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  static Future<Map<String, dynamic>> lockClass(
+    String className,
+    String currentHour,
+  ) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final prefs = await SharedPreferences.getInstance();
+
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/school/lock-class'),
+            headers: headers,
+            body: jsonEncode({
+              'className': className,
+              'currentHour': currentHour,
+              'userId': prefs.getInt('user_id') ?? 1,
+              'userName': prefs.getString('username') ?? 'Εκπαιδευτικός',
+            }),
+          )
+          .timeout(const Duration(seconds: 5));
+
+      final data = jsonDecode(response.body);
+      return {
+        'success': response.statusCode == 200,
+        'message': data['message'] ?? '',
+      };
+    } catch (e) {
+      return {'success': false, 'message': 'Σφάλμα δικτύου κατά τη δέσμευση'};
+    }
+  }
+
+  static Future<void> unlockClass(String className) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      await http
+          .post(
+            Uri.parse('$baseUrl/school/unlock-class'),
+            headers: headers,
+            body: jsonEncode({'className': className}),
+          )
+          .timeout(const Duration(seconds: 5));
+    } catch (e) {
+      // Ignored
+    }
+  }
+
+  // --- 3. STUDENTS ---
+  static Future<List<dynamic>> getStudentsByClass(int classId) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .get(
+            Uri.parse('$baseUrl/school/students/class/$classId'),
+            headers: headers,
+          )
+          .timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as List;
+      }
+      return [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  static Future<bool> insertStudent(
+    String name,
+    String email,
+    int classId,
+  ) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http.post(
+        Uri.parse('$baseUrl/school/students'),
+        headers: headers,
+        body: jsonEncode({'name': name, 'email': email, 'classId': classId}),
+      );
+
+      return response.statusCode == 200 || response.statusCode == 201;
+    } catch (e) {
+      print('❌ Σφάλμα insertStudent: $e');
+      return false;
+    }
+  }
+
+  static Future<bool> updateStudent(int id, String name, String email) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+
+      final response = await http.put(
+        Uri.parse('$baseUrl/school/students/$id'),
+        headers: headers,
+        body: jsonEncode({'name': name, 'email': email}),
+      );
+
+      return response.statusCode == 200;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  static Future<bool> deleteStudent(int id) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+
+      final response = await http.delete(
+        Uri.parse('$baseUrl/school/students/$id'),
+        headers: headers,
+      );
+
+      return response.statusCode == 200;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  static Future<Map<String, dynamic>> uploadStudentsExcel({
+    required String filePath,
+    required int classId,
+  }) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('jwt_token') ?? '';
+
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('$baseUrl/school/students/import-excel'),
+      );
+
+      if (token.isNotEmpty) {
+        request.headers['Authorization'] = 'Bearer $token';
+      }
+
+      request.fields['classId'] = classId.toString();
+      request.files.add(await http.MultipartFile.fromPath('file', filePath));
+
+      final streamedResponse = await request.send().timeout(
+        const Duration(seconds: 15),
+      );
+      final response = await http.Response.fromStream(streamedResponse);
+
+      final data = jsonDecode(response.body);
+
+      return {
+        'success': response.statusCode == 200,
+        'message': data['message'] ?? 'Ολοκληρώθηκε η εισαγωγή.',
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'message': 'Σφάλμα κατά την αποστολή του αρχείου στον Server: $e',
+      };
+    }
+  }
+
+  // --- 4. ATTENDANCE & REPORTS ---
+  /// Υπάρχουσες καταχωρίσεις απουσιών για τμήμα/ώρα (μετά την υποβολή).
+  static Future<Map<String, dynamic>> getAttendanceRecords({
+    required String className,
+    required String period,
+  }) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .get(
+            Uri.parse(
+              '$baseUrl/attendance/records?className=${Uri.encodeComponent(className)}&period=${Uri.encodeComponent(period)}',
+            ),
+            headers: headers,
+          )
+          .timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+    } catch (e) {
+      print('⚠️ Σφάλμα λήψης attendance records: $e');
+    }
+    return {};
+  }
+
+  /// Καταχώριση μόνο ωριαίων απομακρύνσεων σε ήδη υποβληθέν τμήμα.
+  static Future<Map<String, dynamic>> submitHourlyRemovals({
+    required String className,
+    required String period,
+    required List<int> studentIds,
+  }) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/attendance/hourly-removal'),
+            headers: headers,
+            body: jsonEncode({
+              'className': className,
+              'period': period,
+              'studentIds': studentIds,
+            }),
+          )
+          .timeout(const Duration(seconds: 5));
+
+      final data = jsonDecode(response.body);
+      return {
+        'success': response.statusCode == 200 && (data['success'] ?? false),
+        'message': data['message'] ?? '',
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'message': 'Αποτυχία καταχώρισης ωριαίων απομακρύνσεων.',
+      };
+    }
+  }
+
+  static Future<Map<String, dynamic>> submitAttendance({
+    required String className,
+    required String period,
+    required List<Map<String, dynamic>> absences,
+  }) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+
+      final prefs = await SharedPreferences.getInstance();
+      final userRole = prefs.getString('user_role') ?? 'teacher';
+      final teacherId = prefs.getInt('user_id') ?? 1;
+
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/attendance/submit'),
+            headers: headers,
+            body: jsonEncode({
+              'className': className,
+              'period': period,
+              'absences': absences,
+              'userRole': userRole,
+              'teacherId': teacherId,
+            }),
+          )
+          .timeout(const Duration(seconds: 5));
+
+      final data = jsonDecode(response.body);
+      return {
+        'success': response.statusCode == 200,
+        'message': data['message'] ?? '',
+      };
+    } catch (e) {
+      return {'success': false, 'message': 'Αποτυχία υποβολής απουσιών.'};
+    }
+  }
+
+  static Future<List<String>> getSubmittedClassNames(
+    String date,
+    String schoolHour,
+  ) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .get(
+            Uri.parse(
+              '$baseUrl/attendance/submitted?date=${Uri.encodeComponent(date)}&schoolHour=${Uri.encodeComponent(schoolHour)}',
+            ),
+            headers: headers,
+          )
+          .timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        final List list = jsonDecode(response.body);
+        return list.map((item) => item.toString()).toList();
+      }
+      return [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  static Future<List<dynamic>> getReports({
+    required String startDate,
+    required String endDate,
+    String teacherIds = '',
+  }) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .get(
+            Uri.parse(
+              '$baseUrl/reports/logs?startDate=$startDate&endDate=$endDate&teacherIds=$teacherIds',
+            ),
+            headers: headers,
+          )
+          .timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return data['data'] ?? [];
+      }
+      return [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  // --- 5. SETTINGS & ADMIN ---
+  static Future<Map<String, String>> getSmtpSettings() async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .get(Uri.parse('$baseUrl/settings/smtp'), headers: headers)
+          .timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return {
+          'smtp_email': data['smtp_email'] ?? '',
+          'smtp_password': data['smtp_password'] ?? '',
+        };
+      }
+    } catch (e) {
+      print('❌ Σφάλμα κατά τη λήψη ρυθμίσεων SMTP: $e');
+    }
+    return {'smtp_email': '', 'smtp_password': ''};
+  }
+
+  static Future<bool> saveSmtpSettings(String email, String password) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/settings/smtp'),
+            headers: headers,
+            body: jsonEncode({'smtp_email': email, 'smtp_password': password}),
+          )
+          .timeout(const Duration(seconds: 5));
+
+      return response.statusCode == 200;
+    } catch (e) {
+      print('❌ Σφάλμα κατά την αποθήκευση ρυθμίσεων SMTP: $e');
+      return false;
+    }
+  }
+
+  static Future<bool> sendTestEmail(String recipientEmail) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/settings/send-test-email'),
+            headers: headers,
+            body: jsonEncode({'recipientEmail': recipientEmail}),
+          )
+          .timeout(const Duration(seconds: 5));
+      return response.statusCode == 200;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  static Future<List<dynamic>> getDailySummary() async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+
+      final response = await http
+          .get(Uri.parse('$baseUrl/attendance/daily-summary'), headers: headers)
+          .timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as List;
+      }
+      return [];
+    } catch (e) {
+      print('❌ Σφάλμα κατά τη λήψη συγκεντρωτικής αναφοράς: $e');
+      return [];
+    }
+  }
+
+  static Future<Map<String, dynamic>> resetDatabase({
+    required int adminId,
+    required String password,
+  }) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/admin/reset-database'),
+            headers: headers,
+            body: jsonEncode({'adminId': adminId, 'password': password}),
+          )
+          .timeout(const Duration(seconds: 5));
+      final data = jsonDecode(response.body);
+      return {
+        'success': response.statusCode == 200 && (data['success'] ?? false),
+        'message': data['message'] ?? 'Σφάλμα κατά τον καθαρισμό.',
+      };
+    } catch (e) {
+      return {'success': false, 'message': 'Σφάλμα σύνδεσης με τον server.'};
+    }
+  }
+  // --- SCHEDULE & TEST MODE SETTINGS ---
+
+  /// Λήψη των ρυθμίσεων ωραρίου από το Backend
+  static Future<Map<String, dynamic>> getScheduleSettings() async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .get(Uri.parse('$baseUrl/settings/schedule'), headers: headers)
+          .timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+    } catch (e) {
+      print('⚠️ Σφάλμα λήψης ρυθμίσεων ωραρίου: $e');
+    }
+    return {};
+  }
+
+  /// Αποθήκευση ρυθμίσεων ωραρίου & Test Mode
+  static Future<bool> saveScheduleSettings(
+    Map<String, dynamic> settings,
+  ) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/settings/schedule'),
+            headers: headers,
+            body: jsonEncode(settings),
+          )
+          .timeout(const Duration(seconds: 5));
+
+      return response.statusCode == 200;
+    } catch (e) {
+      print('⚠️ Σφάλμα αποθήκευσης ρυθμίσεων ωραρίου: $e');
+      return false;
+    }
+  }
+}
