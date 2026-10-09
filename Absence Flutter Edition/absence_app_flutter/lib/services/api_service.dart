@@ -1,11 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiService {
-  static const String defaultServerIp = '192.168.1.16:5000';
+  /// Για tablets στο σχολικό Wi‑Fi βάλε την IP του κεντρικού PC.
+  /// Στο Flutter Web (ίδιος υπολογιστής με τον server) χρησιμοποιείται localhost.
+  static const String defaultLanServerIp = '192.168.2.102:5000';
+  static String get defaultServerIp =>
+      kIsWeb ? 'localhost:5000' : defaultLanServerIp;
 
   // --- CONFIGURATION & HELPERS ---
   static Future<String> getBaseUrl() async {
@@ -256,6 +261,38 @@ class ApiService {
     }
   }
 
+  /// Διαγραφή όλων των εκπαιδευτικών — παραμένουν μόνο οι admin.
+  static Future<Map<String, dynamic>> deleteAllTeachers() async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http.post(
+        Uri.parse('$baseUrl/auth/users/delete-all-teachers'),
+        headers: headers,
+        body: jsonEncode({}),
+      );
+
+      final data = response.body.isNotEmpty ? jsonDecode(response.body) : {};
+      if (response.statusCode == 200) {
+        return {
+          'success': true,
+          'message': data is Map
+              ? (data['message'] ?? 'Ολοκληρώθηκε.')
+              : 'Ολοκληρώθηκε.',
+          'deleted': data is Map ? data['deleted'] : null,
+        };
+      }
+      return {
+        'success': false,
+        'message': data is Map
+            ? (data['message'] ?? 'Αποτυχία διαγραφής.')
+            : 'Αποτυχία διαγραφής.',
+      };
+    } catch (e) {
+      return {'success': false, 'message': 'Σφάλμα σύνδεσης με τον server.'};
+    }
+  }
+
   // --- 2. SCHOOL & CLASSES ---
   static Future<List<dynamic>> getClasses([
     String currentHour = '1η ώρα',
@@ -457,10 +494,20 @@ class ApiService {
   }
 
   static Future<Map<String, dynamic>> uploadStudentsExcel({
-    required String filePath,
+    String? filePath,
+    List<int>? bytes,
+    String filename = 'students.xlsx',
     required int classId,
   }) async {
     try {
+      if ((filePath == null || filePath.isEmpty) &&
+          (bytes == null || bytes.isEmpty)) {
+        return {
+          'success': false,
+          'message': 'Δεν επιλέχθηκε αρχείο (κενό path/bytes).',
+        };
+      }
+
       final baseUrl = await getBaseUrl();
       final prefs = await SharedPreferences.getInstance();
       final token = prefs.getString('jwt_token') ?? '';
@@ -475,7 +522,13 @@ class ApiService {
       }
 
       request.fields['classId'] = classId.toString();
-      request.files.add(await http.MultipartFile.fromPath('file', filePath));
+      if (bytes != null && bytes.isNotEmpty) {
+        request.files.add(
+          http.MultipartFile.fromBytes('file', bytes, filename: filename),
+        );
+      } else {
+        request.files.add(await http.MultipartFile.fromPath('file', filePath!));
+      }
 
       final streamedResponse = await request.send().timeout(
         const Duration(seconds: 15),
@@ -487,6 +540,74 @@ class ApiService {
       return {
         'success': response.statusCode == 200,
         'message': data['message'] ?? 'Ολοκληρώθηκε η εισαγωγή.',
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'message': 'Σφάλμα κατά την αποστολή του αρχείου στον Server: $e',
+      };
+    }
+  }
+
+  /// Excel εκπαιδευτικών: στήλη A επώνυμο, στήλη B όνομα → username/password.
+  /// Στο Web χρησιμοποίησε [bytes] (το path είναι συχνά null).
+  static Future<Map<String, dynamic>> uploadTeachersExcel({
+    String? filePath,
+    List<int>? bytes,
+    String filename = 'teachers.xlsx',
+  }) async {
+    try {
+      if ((filePath == null || filePath.isEmpty) &&
+          (bytes == null || bytes.isEmpty)) {
+        return {
+          'success': false,
+          'message': 'Δεν επιλέχθηκε αρχείο (κενό path/bytes).',
+        };
+      }
+
+      final baseUrl = await getBaseUrl();
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('jwt_token') ?? '';
+
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('$baseUrl/auth/users/import-excel'),
+      );
+
+      if (token.isNotEmpty) {
+        request.headers['Authorization'] = 'Bearer $token';
+      }
+
+      if (bytes != null && bytes.isNotEmpty) {
+        request.files.add(
+          http.MultipartFile.fromBytes('file', bytes, filename: filename),
+        );
+      } else {
+        request.files.add(await http.MultipartFile.fromPath('file', filePath!));
+      }
+
+      final streamedResponse = await request.send().timeout(
+        const Duration(seconds: 30),
+      );
+      final response = await http.Response.fromStream(streamedResponse);
+      final data = response.body.isNotEmpty ? jsonDecode(response.body) : {};
+
+      if (response.statusCode == 200 && data is Map && data['success'] == true) {
+        return {
+          'success': true,
+          'message': data['message'] ?? 'Ολοκληρώθηκε η εισαγωγή.',
+          'count': data['count'] ?? 0,
+          'credentials': data['credentials'] ?? [],
+          'skipped': data['skipped'] ?? [],
+        };
+      }
+
+      return {
+        'success': false,
+        'message': data is Map
+            ? (data['message'] ?? 'Αποτυχία εισαγωγής.')
+            : 'Αποτυχία εισαγωγής.',
+        'skipped': data is Map ? (data['skipped'] ?? []) : [],
       };
     } catch (e) {
       return {

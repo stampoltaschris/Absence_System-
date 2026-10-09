@@ -2,11 +2,72 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
+const multer = require('multer');
+const xlsx = require('xlsx');
 const db = require('../db');
 const authenticateToken = require('../middleware/auth'); // Εισαγωγή του middleware για ασφάλεια
 
 // 🔒 Ενιαίο JWT Secret με ασφαλές fallback
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_school_jwt_key_2026';
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
+
+/** Μετατροπή ελληνικών (και digraphs) σε λατινικούς χαρακτήρες για username. */
+function transliterateGreek(input) {
+  if (!input) return '';
+  let s = String(input).normalize('NFC').trim().toLowerCase();
+
+  const digraphs = [
+    ['αι', 'ai'], ['ει', 'ei'], ['οι', 'oi'], ['ου', 'ou'],
+    ['αυ', 'av'], ['ευ', 'ev'], ['ηυ', 'iv'],
+    ['μπ', 'b'], ['ντ', 'd'], ['γκ', 'g'], ['γγ', 'ng'],
+    ['τσ', 'ts'], ['τζ', 'tz'], ['θ', 'th'], ['χ', 'ch'], ['ψ', 'ps'],
+  ];
+  for (const [gr, lat] of digraphs) {
+    s = s.split(gr).join(lat);
+  }
+
+  const map = {
+    α: 'a', ά: 'a', β: 'v', γ: 'g', δ: 'd', ε: 'e', έ: 'e', ζ: 'z',
+    η: 'i', ή: 'i', ι: 'i', ί: 'i', ϊ: 'i', ΐ: 'i', κ: 'k', λ: 'l',
+    μ: 'm', ν: 'n', ξ: 'x', ο: 'o', ό: 'o', π: 'p', ρ: 'r', σ: 's',
+    ς: 's', τ: 't', υ: 'y', ύ: 'y', ϋ: 'y', ΰ: 'y', φ: 'f', ω: 'o', ώ: 'o',
+  };
+
+  let out = '';
+  for (const ch of s) {
+    if (map[ch]) out += map[ch];
+    else if (/[a-z0-9]/.test(ch)) out += ch;
+    else if (ch === ' ' || ch === '-' || ch === '_') out += '';
+    // αγνοούμε λοιπά σύμβολα
+  }
+  return out;
+}
+
+function buildBaseUsername(firstName, lastName) {
+  const last = transliterateGreek(lastName);
+  const first = transliterateGreek(firstName);
+  const initial = first.charAt(0) || '';
+  let base = `${initial}${last}`.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!base) base = `teacher${Date.now().toString().slice(-4)}`;
+  if (base.length > 24) base = base.slice(0, 24);
+  return base;
+}
+
+function generatePassword(username) {
+  const n = Math.floor(100 + Math.random() * 900); // 100-999
+  return `${username}${n}`;
+}
+
+function looksLikeHeader(surname, firstname) {
+  const a = String(surname || '').toLowerCase();
+  const b = String(firstname || '').toLowerCase();
+  const headerWords = ['επώνυμο', 'επιθετο', 'επίθετο', 'surname', 'lastname', 'όνομα', 'ονομα', 'firstname', 'name'];
+  return headerWords.some((w) => a.includes(w) || b.includes(w));
+}
 
 // ==========================================
 // POST /api/auth/login
@@ -193,6 +254,134 @@ router.post('/users', authenticateToken, async (req, res) => {
 });
 
 // ==========================================
+// POST /api/auth/users/import-excel
+// Excel: στήλη A = Επώνυμο, στήλη B = Όνομα
+// Δημιουργεί teachers με username (ελληνικά→λατινικά) και προσωρινό password
+// ==========================================
+router.post(
+  '/users/import-excel',
+  authenticateToken,
+  upload.single('file'),
+  async (req, res) => {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Απαγορεύεται η πρόσβαση. Απαιτούνται δικαιώματα διαχειριστή.',
+      });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'Δεν απεστάλη αρχείο Excel.' });
+    }
+
+    let client;
+    try {
+      const workbook = xlsx.read(req.file.buffer, { type: 'buffer' });
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+      const rows = xlsx.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+
+      if (!rows || rows.length === 0) {
+        return res.status(400).json({ success: false, message: 'Το αρχείο είναι άδειο.' });
+      }
+
+      const existingRes = await db.query('SELECT username FROM users');
+      const usedUsernames = new Set(
+        existingRes.rows.map((r) => String(r.username).toLowerCase())
+      );
+
+      const created = [];
+      const skipped = [];
+
+      client = await db.getClient();
+      await client.query('BEGIN');
+
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        if (!row || row.length === 0) continue;
+
+        const surname = row[0] != null ? String(row[0]).trim() : '';
+        const firstname = row[1] != null ? String(row[1]).trim() : '';
+        if (!surname && !firstname) continue;
+        if (i === 0 && looksLikeHeader(surname, firstname)) continue;
+        if (!surname || !firstname) {
+          skipped.push({
+            row: i + 1,
+            reason: 'Λείπει επώνυμο ή όνομα',
+            surname,
+            firstname,
+          });
+          continue;
+        }
+
+        const fullName = `${surname} ${firstname}`.replace(/\s+/g, ' ').trim();
+        let base = buildBaseUsername(firstname, surname);
+        let username = base;
+        let suffix = 2;
+        while (usedUsernames.has(username)) {
+          username = `${base}${suffix}`;
+          suffix += 1;
+          if (suffix > 99) {
+            username = `${base}${Date.now().toString().slice(-3)}`;
+            break;
+          }
+        }
+
+        const plainPassword = generatePassword(username);
+        const hashedPassword = await bcrypt.hash(plainPassword, 10);
+
+        const result = await client.query(
+          `INSERT INTO users (name, username, password, role, is_first_login)
+           VALUES ($1, $2, $3, 'teacher', TRUE)
+           RETURNING id, name, username, role`,
+          [fullName, username, hashedPassword]
+        );
+
+        usedUsernames.add(username);
+        created.push({
+          id: result.rows[0].id,
+          name: fullName,
+          username,
+          password: plainPassword,
+        });
+      }
+
+      if (created.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          success: false,
+          message: 'Δεν δημιουργήθηκαν λογαριασμοί. Ελέγξτε ότι το Excel έχει Επώνυμο | Όνομα.',
+          skipped,
+        });
+      }
+
+      await client.query('COMMIT');
+      console.log(`👤 [ADMIN] Excel import: ${created.length} εκπαιδευτικοί`);
+
+      res.json({
+        success: true,
+        message: `Δημιουργήθηκαν ${created.length} λογαριασμοί εκπαιδευτικών.`,
+        count: created.length,
+        credentials: created,
+        skipped,
+      });
+    } catch (err) {
+      if (client) {
+        try {
+          await client.query('ROLLBACK');
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      console.error('❌ [TEACHERS EXCEL IMPORT]:', err.message);
+      res.status(500).json({ success: false, message: `Σφάλμα επεξεργασίας: ${err.message}` });
+    } finally {
+      if (client) client.release();
+    }
+  }
+);
+
+// ==========================================
 // PUT /api/auth/users/:id
 // Ενημέρωση εκπαιδευτικού (όνομα / username / προαιρετικά κωδικός)
 // ==========================================
@@ -255,6 +444,58 @@ router.put('/users/:id', authenticateToken, async (req, res) => {
     if (err.code === '23505') {
       return res.status(400).json({ success: false, message: 'Το username χρησιμοποιείται ήδη.' });
     }
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ==========================================
+// POST /api/auth/users/delete-all-teachers
+// Διαγραφή ΟΛΩΝ των εκπαιδευτικών — διατηρούνται οι admin
+// ==========================================
+router.post('/users/delete-all-teachers', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({
+      success: false,
+      message: 'Απαγορεύεται η πρόσβαση. Απαιτούνται δικαιώματα διαχειριστή.',
+    });
+  }
+
+  try {
+    const countRes = await db.query(
+      `SELECT COUNT(*)::int AS n FROM users WHERE role = 'teacher'`
+    );
+    const toDelete = countRes.rows[0]?.n ?? 0;
+
+    if (toDelete === 0) {
+      return res.json({
+        success: true,
+        message: 'Δεν υπάρχουν λογαριασμοί εκπαιδευτικών προς διαγραφή.',
+        deleted: 0,
+      });
+    }
+
+    // Locks εκπαιδευτικών
+    await db.query(
+      `DELETE FROM class_locks
+       WHERE user_id IN (SELECT id FROM users WHERE role = 'teacher')`
+    );
+
+    // attendance.teacher_id → ON DELETE CASCADE
+    const del = await db.query(
+      `DELETE FROM users WHERE role = 'teacher' RETURNING id, username`
+    );
+
+    console.log(
+      `🗑️ [ADMIN] Μαζική διαγραφή εκπαιδευτικών: ${del.rowCount} (από ${req.user.username})`
+    );
+
+    res.json({
+      success: true,
+      message: `Διαγράφηκαν ${del.rowCount} λογαριασμοί εκπαιδευτικών. Ο διαχειριστής παρέμεινε.`,
+      deleted: del.rowCount,
+    });
+  } catch (err) {
+    console.error('❌ [DELETE ALL TEACHERS]:', err.message);
     res.status(500).json({ success: false, message: err.message });
   }
 });

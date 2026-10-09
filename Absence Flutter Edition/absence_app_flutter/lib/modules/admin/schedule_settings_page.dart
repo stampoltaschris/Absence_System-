@@ -236,7 +236,7 @@ class _ScheduleSettingsPageState extends State<ScheduleSettingsPage> {
                         style: TextStyle(fontSize: 12),
                       ),
                       value: _forceTestMode,
-                      activeColor: Colors.amber.shade900,
+                      activeThumbColor: Colors.amber.shade900,
                       onChanged: (val) {
                         setState(() => _forceTestMode = val);
                       },

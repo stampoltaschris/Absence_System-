@@ -1,5 +1,6 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../services/api_service.dart';
 import 'admin_reports_page.dart';
@@ -25,6 +26,7 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
   List<dynamic> _studentsInSelectedClass = [];
   List<Map<String, dynamic>> _teachers = [];
   bool _loadingTeachers = false;
+  bool _isImportingTeachers = false;
   int? _selectedClassId;
   bool _hasSearched = false;
   bool _isImporting = false;
@@ -101,13 +103,32 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
         return;
       }
 
-      final String? filePath = pickerResult.single.path;
-      if (filePath == null) return;
+      final picked = pickerResult.single;
+      final String? filePath = picked.path;
+      List<int>? bytes;
+      try {
+        bytes = await picked.readAsBytes();
+      } catch (_) {
+        bytes = null;
+      }
+      if ((filePath == null || filePath.isEmpty) &&
+          (bytes == null || bytes.isEmpty)) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Δεν ήταν δυνατή η ανάγνωση του αρχείου.'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        return;
+      }
 
       setState(() => _isImporting = true);
 
       final result = await ApiService.uploadStudentsExcel(
         filePath: filePath,
+        bytes: bytes,
+        filename: picked.name.isNotEmpty ? picked.name : 'students.xlsx',
         classId: _selectedClassId!,
       );
 
@@ -419,6 +440,168 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
     }
   }
 
+  Future<void> _importTeachersFromExcel() async {
+    try {
+      final pickerResult = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['xlsx', 'xls', 'csv'],
+      );
+      if (pickerResult.isEmpty) return;
+
+      final file = pickerResult.single;
+      final String? filePath = file.path;
+      List<int>? bytes;
+      try {
+        // Στο Web το path είναι null — διαβάζουμε bytes από το PlatformFile
+        bytes = await file.readAsBytes();
+      } catch (_) {
+        bytes = null;
+      }
+
+      if ((filePath == null || filePath.isEmpty) &&
+          (bytes == null || bytes.isEmpty)) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Δεν ήταν δυνατή η ανάγνωση του αρχείου. Δοκιμάστε ξανά ή Windows desktop.',
+            ),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        return;
+      }
+
+      setState(() => _isImportingTeachers = true);
+
+      final result = await ApiService.uploadTeachersExcel(
+        filePath: filePath,
+        bytes: bytes,
+        filename: file.name.isNotEmpty ? file.name : 'teachers.xlsx',
+      );
+
+      if (!mounted) return;
+      setState(() => _isImportingTeachers = false);
+
+      if (result['success'] == true) {
+        await _loadTeachers();
+        if (!mounted) return;
+        final credentials = (result['credentials'] is List)
+            ? List<Map<String, dynamic>>.from(
+                (result['credentials'] as List).map(
+                  (e) => Map<String, dynamic>.from(e as Map),
+                ),
+              )
+            : <Map<String, dynamic>>[];
+        await _showTeacherCredentialsDialog(
+          message: result['message']?.toString() ?? 'Εισαγωγή ολοκληρώθηκε.',
+          credentials: credentials,
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(result['message'] ?? 'Αποτυχία εισαγωγής.'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isImportingTeachers = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Σφάλμα: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  Future<void> _showTeacherCredentialsDialog({
+    required String message,
+    required List<Map<String, dynamic>> credentials,
+  }) async {
+    final buffer = StringBuffer();
+    buffer.writeln('Ονοματεπώνυμο\tUsername\tPassword');
+    for (final c in credentials) {
+      buffer.writeln(
+        '${c['name']}\t${c['username']}\t${c['password']}',
+      );
+    }
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Νέοι λογαριασμοί εκπαιδευτικών'),
+          content: SizedBox(
+            width: 520,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(message),
+                const SizedBox(height: 8),
+                const Text(
+                  'Αποθηκεύστε τα password τώρα — δεν εμφανίζονται ξανά.',
+                  style: TextStyle(
+                    color: Colors.red,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 360),
+                  child: SingleChildScrollView(
+                    child: DataTable(
+                      columnSpacing: 16,
+                      columns: const [
+                        DataColumn(label: Text('Ονοματεπώνυμο')),
+                        DataColumn(label: Text('Username')),
+                        DataColumn(label: Text('Password')),
+                      ],
+                      rows: credentials
+                          .map(
+                            (c) => DataRow(
+                              cells: [
+                                DataCell(Text(c['name']?.toString() ?? '')),
+                                DataCell(Text(c['username']?.toString() ?? '')),
+                                DataCell(Text(c['password']?.toString() ?? '')),
+                              ],
+                            ),
+                          )
+                          .toList(),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () async {
+                await Clipboard.setData(
+                  ClipboardData(text: buffer.toString()),
+                );
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Αντιγράφηκαν στο πρόχειρο.'),
+                    ),
+                  );
+                }
+              },
+              child: const Text('Αντιγραφή'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Κλείσιμο'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   // 3. Προσθήκη Εκπαιδευτικού
   Future<void> _addUser() async {
     final name = _userNameController.text.trim();
@@ -557,6 +740,50 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
       password: password.isEmpty ? null : password,
     );
 
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(result['message'] ?? ''),
+        backgroundColor:
+            result['success'] == true ? Colors.green : Colors.red,
+      ),
+    );
+    if (result['success'] == true) {
+      await _loadTeachers();
+    }
+  }
+
+  Future<void> _deleteAllTeachers() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Διαγραφή όλων των εκπαιδευτικών'),
+        content: const Text(
+          'Θα διαγραφούν ΟΛΟΙ οι λογαριασμοί εκπαιδευτικών.\n'
+          'Ο λογαριασμός διαχειριστή (admin) θα παραμείνει.\n\n'
+          'Προσοχή: θα διαγραφούν και οι απουσίες που υπέβαλαν οι εκπαιδευτικοί.\n\n'
+          'Η ενέργεια δεν αναιρείται.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Ακύρωση'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text(
+              'Διαγραφή όλων',
+              style: TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    final result = await ApiService.deleteAllTeachers();
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -1038,13 +1265,47 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
                     ),
                   ),
                   const SizedBox(height: 12),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: ElevatedButton.icon(
-                      onPressed: _addUser,
-                      icon: const Icon(Icons.how_to_reg),
-                      label: const Text('Δημιουργία Λογαριασμού'),
-                    ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: _isImportingTeachers
+                              ? null
+                              : _importTeachersFromExcel,
+                          icon: _isImportingTeachers
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Icon(Icons.upload_file),
+                          label: Text(
+                            _isImportingTeachers
+                                ? 'Εισαγωγή...'
+                                : 'Excel (Επώνυμο | Όνομα)',
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.teal.shade700,
+                            foregroundColor: Colors.white,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      ElevatedButton.icon(
+                        onPressed: _addUser,
+                        icon: const Icon(Icons.how_to_reg),
+                        label: const Text('Δημιουργία Λογαριασμού'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Excel: στήλη A = Επώνυμο, στήλη B = Όνομα. '
+                    'Username = αρχικό ονόματος + επώνυμο (λατινικά), π.χ. Παπαδόπουλος Μαρία → mpapadopoulos',
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
                   ),
                   const SizedBox(height: 20),
                   Row(
@@ -1056,6 +1317,16 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
                           ),
+                        ),
+                      ),
+                      TextButton.icon(
+                        onPressed: _teachers.isEmpty || _loadingTeachers
+                            ? null
+                            : _deleteAllTeachers,
+                        icon: const Icon(Icons.delete_forever, color: Colors.red),
+                        label: const Text(
+                          'Διαγραφή όλων',
+                          style: TextStyle(color: Colors.red),
                         ),
                       ),
                       IconButton(
