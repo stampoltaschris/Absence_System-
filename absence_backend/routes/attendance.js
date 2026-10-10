@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const nodemailer = require('nodemailer');
+const { getAthensParts, getAthensDateString } = require('../utils/athens_time');
+const { teacherCanAccessClass } = require('../utils/teacher_assignments');
 
 const DEFAULT_ACTIVE_DAYS = {
   'Δευτέρα': true,
@@ -60,10 +62,9 @@ function parseTimeToMinutes(value) {
  * Ώρα πάντα Europe/Athens.
  */
 async function checkSchoolSchedule() {
-  const greekTimeStr = new Date().toLocaleString('en-US', { timeZone: 'Europe/Athens' });
-  const now = new Date(greekTimeStr);
-  const dayName = GREEK_DAYS_BY_JS[now.getDay()];
-  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const athens = getAthensParts();
+  const dayName = GREEK_DAYS_BY_JS[athens.jsDay];
+  const currentMinutes = athens.minutesOfDay;
 
   let forceTestMode = false;
   let activeDays = { ...DEFAULT_ACTIVE_DAYS };
@@ -127,7 +128,7 @@ router.post('/submit', async (req, res) => {
   let listToProcess = attendanceList;
   let targetClassName = className;
   let targetPeriod = period;
-  let targetDate = new Date().toISOString().split('T')[0];
+  let targetDate = getAthensDateString();
 
   if (!listToProcess && absences && Array.isArray(absences)) {
     listToProcess = absences.map(abs => {
@@ -173,6 +174,18 @@ router.post('/submit', async (req, res) => {
 
   const currentUsername = req.user?.username || 'teacher';
   const currentUserRole = req.user?.role || userRole;
+
+  // Εκπαιδευτικός: μόνο τμήματα με ανάθεση
+  if (currentUserRole !== 'admin') {
+    const allowed = await teacherCanAccessClass(req.user, targetClassName);
+    if (!allowed) {
+      return res.status(403).json({
+        message:
+          `Δεν έχετε ανάθεση στο τμήμα ${targetClassName}. ` +
+          'Επιτρέπεται καταχώριση μόνο στα τμήματα που σας έχουν ανατεθεί.',
+      });
+    }
+  }
 
   // Έλεγχος Ωραρίου & Δικαιωμάτων (από schedule_settings)
   const schedule = await checkSchoolSchedule();
@@ -413,11 +426,21 @@ router.post('/submit', async (req, res) => {
 router.get('/records', async (req, res) => {
   const className = req.query.className;
   const period = req.query.period || req.query.hour;
-  const greekTimeStr = new Date().toLocaleString('en-US', { timeZone: 'Europe/Athens' });
-  const date = req.query.date || new Date(greekTimeStr).toISOString().split('T')[0];
+  const date = req.query.date || getAthensDateString();
 
   if (!className || !period) {
     return res.status(400).json({ message: 'Απαιτούνται className και period.' });
+  }
+
+  if (req.user?.role !== 'admin') {
+    const allowed = await teacherCanAccessClass(req.user, className);
+    if (!allowed) {
+      return res.status(403).json({
+        message:
+          `Δεν έχετε ανάθεση στο τμήμα ${className}. ` +
+          'Επιτρέπεται πρόσβαση μόνο στα τμήματα που σας έχουν ανατεθεί.',
+      });
+    }
   }
 
   try {
@@ -460,8 +483,7 @@ router.get('/records', async (req, res) => {
 // ==========================================
 router.post('/hourly-removal', async (req, res) => {
   const { className, period, studentIds } = req.body;
-  const greekTimeStr = new Date().toLocaleString('en-US', { timeZone: 'Europe/Athens' });
-  const targetDate = new Date(greekTimeStr).toISOString().split('T')[0];
+  const targetDate = getAthensDateString();
   const targetTeacherId = parseInt(req.user?.id, 10);
   const currentUserRole = req.user?.role;
 
@@ -485,6 +507,18 @@ router.post('/hourly-removal', async (req, res) => {
 
   if (Number.isNaN(targetTeacherId)) {
     return res.status(401).json({ success: false, message: 'Μη έγκυρος χρήστης.' });
+  }
+
+  if (currentUserRole !== 'admin') {
+    const allowed = await teacherCanAccessClass(req.user, className);
+    if (!allowed) {
+      return res.status(403).json({
+        success: false,
+        message:
+          `Δεν έχετε ανάθεση στο τμήμα ${className}. ` +
+          'Επιτρέπεται ενέργεια μόνο στα τμήματα που σας έχουν ανατεθεί.',
+      });
+    }
   }
 
   let client;
@@ -611,7 +645,7 @@ router.get('/submitted', async (req, res) => {
 // Συγκεντρωτική Αναφορά Ημέρας (Live Monitor)
 // ==========================================
 router.get('/daily-summary', async (req, res) => {
-  const targetDate = req.query.date || new Date().toISOString().split('T')[0];
+  const targetDate = req.query.date || getAthensDateString();
 
   try {
     const query = `

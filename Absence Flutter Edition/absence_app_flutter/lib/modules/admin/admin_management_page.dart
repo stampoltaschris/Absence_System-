@@ -27,6 +27,9 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
   List<Map<String, dynamic>> _teachers = [];
   bool _loadingTeachers = false;
   bool _isImportingTeachers = false;
+  List<Map<String, dynamic>> _assignments = [];
+  bool _loadingAssignments = false;
+  bool _isImportingAssignments = false;
   int? _selectedClassId;
   bool _hasSearched = false;
   bool _isImporting = false;
@@ -36,6 +39,7 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
     super.initState();
     _loadClasses();
     _loadTeachers();
+    _loadAssignments();
   }
 
   @override
@@ -379,11 +383,60 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
         _studentsInSelectedClass.clear();
         _hasSearched = false;
       }
-      await _loadClasses();
+      await Future.wait([_loadClasses(), _loadAssignments()]);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Το τμήμα "$className" διαγράφηκε.')),
       );
+    }
+  }
+
+  Future<void> _deleteAllClasses() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Διαγραφή όλων των τμημάτων'),
+        content: const Text(
+          'Θα διαγραφούν ΟΛΑ τα τμήματα.\n\n'
+          'Μαζί: μαθητές, απουσίες, αναθέσεις τμημάτων και δεσμεύσεις.\n'
+          'Οι λογαριασμοί εκπαιδευτικών θα παραμείνουν.\n\n'
+          'Η ενέργεια δεν αναιρείται.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Ακύρωση'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text(
+              'Διαγραφή όλων',
+              style: TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    final result = await ApiService.deleteAllClasses();
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(result['message']?.toString() ?? ''),
+        backgroundColor:
+            result['success'] == true ? Colors.green : Colors.red,
+      ),
+    );
+
+    if (result['success'] == true) {
+      _selectedClassId = null;
+      _studentsInSelectedClass.clear();
+      _hasSearched = false;
+      await Future.wait([_loadClasses(), _loadAssignments()]);
     }
   }
 
@@ -602,6 +655,165 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
     );
   }
 
+  Future<void> _loadAssignments() async {
+    setState(() => _loadingAssignments = true);
+    try {
+      final result = await ApiService.getTeacherAssignments();
+      if (!mounted) return;
+      final list = (result['assignments'] is List)
+          ? List<Map<String, dynamic>>.from(
+              (result['assignments'] as List).map(
+                (e) => Map<String, dynamic>.from(e as Map),
+              ),
+            )
+          : <Map<String, dynamic>>[];
+      setState(() {
+        _assignments = list;
+        _loadingAssignments = false;
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() => _loadingAssignments = false);
+        debugPrint('❌ Σφάλμα φόρτωσης αναθέσεων: $e');
+      }
+    }
+  }
+
+  Future<void> _importAssignmentsFromExcel() async {
+    try {
+      final pickerResult = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['xlsx', 'xls', 'csv'],
+      );
+      if (pickerResult.isEmpty) return;
+
+      final file = pickerResult.single;
+      final String? filePath = file.path;
+      List<int>? bytes;
+      try {
+        bytes = await file.readAsBytes();
+      } catch (_) {
+        bytes = null;
+      }
+
+      if ((filePath == null || filePath.isEmpty) &&
+          (bytes == null || bytes.isEmpty)) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Δεν ήταν δυνατή η ανάγνωση του αρχείου. Δοκιμάστε ξανά.',
+            ),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        return;
+      }
+
+      setState(() => _isImportingAssignments = true);
+
+      final result = await ApiService.uploadTeacherAssignmentsExcel(
+        filePath: filePath,
+        bytes: bytes,
+        filename: file.name.isNotEmpty ? file.name : 'assignments.xlsx',
+      );
+
+      if (!mounted) return;
+      setState(() => _isImportingAssignments = false);
+
+      if (result['success'] == true) {
+        await Future.wait([_loadAssignments(), _loadTeachers(), _loadClasses()]);
+        if (!mounted) return;
+
+        final credentials = (result['credentials'] is List)
+            ? List<Map<String, dynamic>>.from(
+                (result['credentials'] as List).map(
+                  (e) => Map<String, dynamic>.from(e as Map),
+                ),
+              )
+            : <Map<String, dynamic>>[];
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(result['message']?.toString() ?? 'Ολοκληρώθηκε.'),
+            backgroundColor: Colors.green.shade700,
+          ),
+        );
+
+        if (credentials.isNotEmpty) {
+          await _showTeacherCredentialsDialog(
+            message: result['message']?.toString() ??
+                'Δημιουργήθηκαν νέοι λογαριασμοί.',
+            credentials: credentials,
+          );
+        }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(result['message'] ?? 'Αποτυχία εισαγωγής.'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isImportingAssignments = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Σφάλμα: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  Future<void> _clearAllAssignments() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Καθαρισμός αναθέσεων'),
+        content: const Text(
+          'Θα διαγραφούν ΜΟΝΟ οι αναθέσεις τμημάτων σε εκπαιδευτικούς.\n\n'
+          'Τα τμήματα, οι μαθητές και οι λογαριασμοί εκπαιδευτικών '
+          'θα παραμείνουν.\n\n'
+          'Η ενέργεια δεν αναιρείται.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Ακύρωση'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Διαγραφή'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    final result = await ApiService.clearTeacherAssignments();
+    if (!mounted) return;
+
+    if (result['success'] == true) {
+      await _loadAssignments();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(result['message']?.toString() ?? 'Διαγράφηκαν.'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(result['message'] ?? 'Αποτυχία διαγραφής.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
   // 3. Προσθήκη Εκπαιδευτικού
   Future<void> _addUser() async {
     final name = _userNameController.text.trim();
@@ -759,8 +971,10 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
       builder: (context) => AlertDialog(
         title: const Text('Διαγραφή όλων των εκπαιδευτικών'),
         content: const Text(
-          'Θα διαγραφούν ΟΛΟΙ οι λογαριασμοί εκπαιδευτικών.\n'
-          'Ο λογαριασμός διαχειριστή (admin) θα παραμείνει.\n\n'
+          'Θα διαγραφούν ΟΛΟΙ οι λογαριασμοί εκπαιδευτικών '
+          'και όλες οι αναθέσεις τους.\n'
+          'Τα τμήματα και οι μαθητές θα παραμείνουν.\n'
+          'Ο διαχειριστής (admin) θα παραμείνει.\n\n'
           'Προσοχή: θα διαγραφούν και οι απουσίες που υπέβαλαν οι εκπαιδευτικοί.\n\n'
           'Η ενέργεια δεν αναιρείται.',
         ),
@@ -793,7 +1007,7 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
       ),
     );
     if (result['success'] == true) {
-      await _loadTeachers();
+      await Future.wait([_loadTeachers(), _loadAssignments()]);
     }
   }
 
@@ -848,7 +1062,7 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 3,
+      length: 4,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Διαχείριση Δεδομένων'),
@@ -874,13 +1088,18 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
             ),
           ],
           bottom: const TabBar(
+            isScrollable: true,
             labelColor: Colors.white,
             unselectedLabelColor: Colors.white70,
             indicatorColor: Colors.white,
             tabs: [
               Tab(icon: Icon(Icons.class_), text: 'Τμήματα'),
               Tab(icon: Icon(Icons.person_add), text: 'Μαθητές'),
-              Tab(icon: Icon(Icons.badge), text: 'Εκπαιδευτικοί'),
+              Tab(icon: Icon(Icons.badge), text: 'Λογαριασμοί Εκπαιδευτικών'),
+              Tab(
+                icon: Icon(Icons.assignment_ind),
+                text: 'Αναθέσεις τμημάτων σε εκπαιδευτικούς',
+              ),
             ],
           ),
         ),
@@ -918,9 +1137,29 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
                     ],
                   ),
                   const SizedBox(height: 24),
-                  const Text(
-                    'Υπάρχοντα Τμήματα',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Υπάρχοντα Τμήματα',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      TextButton.icon(
+                        onPressed: _classList.isEmpty ? null : _deleteAllClasses,
+                        icon: const Icon(
+                          Icons.delete_forever,
+                          color: Colors.red,
+                        ),
+                        label: const Text(
+                          'Διαγραφή όλων',
+                          style: TextStyle(color: Colors.red),
+                        ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 12),
                   Expanded(
@@ -1399,6 +1638,212 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
                               );
                             },
                           ),
+                  ),
+                ],
+              ),
+            ),
+
+            // TAB 4: Αναθέσεις τμημάτων σε εκπαιδευτικούς
+            Padding(
+              padding: const EdgeInsets.all(24.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: _isImportingAssignments
+                              ? null
+                              : _importAssignmentsFromExcel,
+                          icon: _isImportingAssignments
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Icon(Icons.upload_file),
+                          label: Text(
+                            _isImportingAssignments
+                                ? 'Εισαγωγή...'
+                                : 'Excel (Ονοματεπώνυμο | Τμήματα)',
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.indigo.shade700,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 16,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      TextButton.icon(
+                        onPressed: _assignments.isEmpty || _loadingAssignments
+                            ? null
+                            : _clearAllAssignments,
+                        icon: const Icon(
+                          Icons.delete_forever,
+                          color: Colors.red,
+                        ),
+                        label: const Text(
+                          'Καθαρισμός',
+                          style: TextStyle(color: Colors.red),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Ανανέωση',
+                        onPressed:
+                            _loadingAssignments ? null : _loadAssignments,
+                        icon: _loadingAssignments
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.refresh),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Excel: στήλη A = Ονοματεπώνυμο, στήλη B = Τμήματα '
+                    '(π.χ. Α1, Α3, ΒΘΣ1). Δημιουργεί λογαριασμό αν δεν υπάρχει '
+                    '(username = αρχικό ονόματος + επώνυμο λατινικά).',
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+                  ),
+                  const SizedBox(height: 20),
+                  const Text(
+                    'Λίστα αναθέσεων',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  Expanded(
+                    child: _loadingAssignments && _assignments.isEmpty
+                        ? const Center(child: CircularProgressIndicator())
+                        : _assignments.isEmpty
+                            ? Center(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      Icons.assignment_ind_outlined,
+                                      size: 56,
+                                      color: Colors.grey.shade400,
+                                    ),
+                                    const SizedBox(height: 12),
+                                    Text(
+                                      'Δεν υπάρχουν αναθέσεις.\n'
+                                      'Εισάγετε Excel με ονοματεπώνυμο και τμήματα.',
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(
+                                        color: Colors.grey.shade600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              )
+                            : ListView.builder(
+                                itemCount: _assignments.length,
+                                itemBuilder: (context, index) {
+                                  final a = _assignments[index];
+                                  final name = a['name']?.toString() ?? '';
+                                  final username =
+                                      a['username']?.toString() ?? '';
+                                  final classes = (a['classes'] is List)
+                                      ? List<String>.from(
+                                          (a['classes'] as List).map(
+                                            (e) => e.toString(),
+                                          ),
+                                        )
+                                      : <String>[];
+                                  return Card(
+                                    margin: const EdgeInsets.only(bottom: 10),
+                                    child: Padding(
+                                      padding: const EdgeInsets.all(12),
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Row(
+                                            children: [
+                                              CircleAvatar(
+                                                backgroundColor:
+                                                    Colors.indigo.shade50,
+                                                child: Icon(
+                                                  Icons.person,
+                                                  color:
+                                                      Colors.indigo.shade700,
+                                                ),
+                                              ),
+                                              const SizedBox(width: 12),
+                                              Expanded(
+                                                child: Column(
+                                                  crossAxisAlignment:
+                                                      CrossAxisAlignment.start,
+                                                  children: [
+                                                    Text(
+                                                      name,
+                                                      style: const TextStyle(
+                                                        fontWeight:
+                                                            FontWeight.bold,
+                                                        fontSize: 15,
+                                                      ),
+                                                    ),
+                                                    if (username.isNotEmpty)
+                                                      Text(
+                                                        '@$username',
+                                                        style: TextStyle(
+                                                          color: Colors
+                                                              .grey.shade700,
+                                                          fontSize: 12,
+                                                        ),
+                                                      ),
+                                                  ],
+                                                ),
+                                              ),
+                                              Text(
+                                                '${classes.length} τμήμ.',
+                                                style: TextStyle(
+                                                  color: Colors.grey.shade600,
+                                                  fontSize: 12,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                          if (classes.isNotEmpty) ...[
+                                            const SizedBox(height: 10),
+                                            Wrap(
+                                              spacing: 6,
+                                              runSpacing: 6,
+                                              children: classes
+                                                  .map(
+                                                    (c) => Chip(
+                                                      label: Text(c),
+                                                      visualDensity:
+                                                          VisualDensity.compact,
+                                                      materialTapTargetSize:
+                                                          MaterialTapTargetSize
+                                                              .shrinkWrap,
+                                                      backgroundColor: Colors
+                                                          .indigo.shade50,
+                                                    ),
+                                                  )
+                                                  .toList(),
+                                            ),
+                                          ],
+                                        ],
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
                   ),
                 ],
               ),

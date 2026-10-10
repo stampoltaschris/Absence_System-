@@ -1,12 +1,10 @@
 import 'package:flutter/material.dart';
 
+import 'core/app_theme.dart';
 import 'modules/auth/login_page.dart';
 
 void main() {
-  // Εξασφάλιση αρχικοποίησης των Flutter Bindings
   WidgetsFlutterBinding.ensureInitialized();
-
-  // Εκκίνηση της εφαρμογής Flutter
   runApp(const AttendanceApp());
 }
 
@@ -18,10 +16,7 @@ class AttendanceApp extends StatelessWidget {
     return MaterialApp(
       title: 'Σύστημα Απουσιών',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
-        useMaterial3: true,
-      ),
+      theme: AppTheme.light(),
       home: const LoginPage(),
     );
   }

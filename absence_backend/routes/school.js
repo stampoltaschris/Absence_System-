@@ -4,6 +4,11 @@ const multer = require('multer');
 const xlsx = require('xlsx');
 const db = require('../db');
 const authenticateToken = require('../middleware/auth'); // Προσθήκη για ασφάλεια
+const { getAthensDateString } = require('../utils/athens_time');
+const {
+  getClassesForUser,
+  teacherCanAccessClass,
+} = require('../utils/teacher_assignments');
 
 // Ρύθμιση του multer για προσωρινή αποθήκευση του αρχείου στη μνήμη (RAM) με όριο 5MB
 const upload = multer({ 
@@ -26,14 +31,13 @@ async function purgeStaleLocks() {
 // Λήψη όλων των τμημάτων (Προστατευμένο)
 router.get('/classes', authenticateToken, async (req, res) => {
   const currentHour = req.query.currentHour || '1η ώρα';
-  const greekTimeStr = new Date().toLocaleString("en-US", { timeZone: "Europe/Athens" });
-  const today = new Date(greekTimeStr).toISOString().split('T')[0];
+  const today = getAthensDateString();
 
   try {
     await purgeStaleLocks();
 
-    const classesRes = await db.query('SELECT * FROM classes ORDER BY name ASC');
-    const classes = classesRes.rows;
+    // Εκπαιδευτικός: μόνο τα τμήματα που του έχουν ανατεθεί · Admin: όλα
+    const classes = await getClassesForUser(req.user);
 
     const submittedRes = await db.query(
       'SELECT class_name FROM submitted_attendance WHERE date = $1 AND school_hour = $2',
@@ -111,6 +115,56 @@ router.post('/classes', authenticateToken, async (req, res) => {
   }
 });
 
+// POST /api/school/classes/delete-all (Μόνο Admin)
+// Διαγράφει όλα τα τμήματα (+ μαθητές/απουσίες μέσω CASCADE) και σχετικά locks/αναθέσεις
+router.post('/classes/delete-all', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({
+      success: false,
+      message: 'Απαγορεύεται η πρόσβαση. Απαιτούνται δικαιώματα διαχειριστή.',
+    });
+  }
+
+  try {
+    const countRes = await db.query(
+      `SELECT COUNT(*)::int AS n FROM classes`
+    );
+    const toDelete = countRes.rows[0]?.n ?? 0;
+
+    if (toDelete === 0) {
+      return res.json({
+        success: true,
+        message: 'Δεν υπάρχουν τμήματα προς διαγραφή.',
+        deleted: 0,
+      });
+    }
+
+    await db.query('DELETE FROM teacher_class_assignments');
+    await db.query('DELETE FROM class_locks');
+    await db.query('DELETE FROM submitted_attendance');
+
+    // students → ON DELETE CASCADE από classes · attendance → CASCADE από students
+    const del = await db.query(
+      `DELETE FROM classes RETURNING id, name`
+    );
+
+    console.log(
+      `🗑️ [ADMIN] Διαγραφή όλων των τμημάτων: ${del.rowCount} (από ${req.user.username})`
+    );
+
+    res.json({
+      success: true,
+      message:
+        `Διαγράφηκαν ${del.rowCount} τμήματα ` +
+        `(μαζί με μαθητές, απουσίες και αναθέσεις τμημάτων).`,
+      deleted: del.rowCount,
+    });
+  } catch (err) {
+    console.error('❌ [DELETE ALL CLASSES]:', err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // DELETE /api/school/classes/:id (Μόνο Admin)
 router.delete('/classes/:id', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
@@ -119,6 +173,23 @@ router.delete('/classes/:id', authenticateToken, async (req, res) => {
 
   const { id } = req.params;
   try {
+    const cls = await db.query('SELECT name FROM classes WHERE id = $1', [id]);
+    const className = cls.rows[0]?.name;
+
+    if (className) {
+      await db.query(
+        'DELETE FROM teacher_class_assignments WHERE class_name = $1',
+        [className]
+      );
+      await db.query('DELETE FROM class_locks WHERE class_name = $1', [
+        className,
+      ]);
+      await db.query(
+        'DELETE FROM submitted_attendance WHERE class_name = $1',
+        [className]
+      );
+    }
+
     await db.query('DELETE FROM classes WHERE id = $1', [id]);
     res.json({ success: true, message: 'Το τμήμα διαγράφηκε επιτυχώς.' });
   } catch (err) {
@@ -156,13 +227,25 @@ router.post('/lock-class', authenticateToken, async (req, res) => {
   try {
     await purgeStaleLocks();
 
+    const myId = parseInt(userId, 10);
+    const isAdmin = req.user?.role === 'admin';
+
+    if (!isAdmin) {
+      const allowed = await teacherCanAccessClass(req.user, className);
+      if (!allowed) {
+        return res.status(403).json({
+          success: false,
+          message:
+            `Δεν έχετε ανάθεση στο τμήμα ${className}. ` +
+            'Επιτρέπονται μόνο τα τμήματα που σας έχουν ανατεθεί.',
+        });
+      }
+    }
+
     const existing = await db.query(
       'SELECT user_id, user_name FROM class_locks WHERE class_name = $1 AND school_hour = $2',
       [className, currentHour]
     );
-
-    const myId = parseInt(userId, 10);
-    const isAdmin = req.user?.role === 'admin';
 
     if (existing.rows.length > 0) {
       const holderId = parseInt(existing.rows[0].user_id, 10);
@@ -391,6 +474,74 @@ router.post('/students/import-excel', authenticateToken, upload.single('file'), 
     res.status(500).json({ message: `Σφάλμα επεξεργασίας: ${err.message}` });
   } finally {
     if (client) client.release();
+  }
+});
+
+// ==========================================
+// ΑΝΑΘΕΣΕΙΣ ΤΜΗΜΑΤΩΝ ΣΕ ΕΚΠΑΙΔΕΥΤΙΚΟΥΣ
+// ==========================================
+
+// GET /api/school/teacher-assignments
+router.get('/teacher-assignments', authenticateToken, async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT u.id AS teacher_id, u.name, u.username,
+              COALESCE(
+                array_agg(a.class_name ORDER BY a.class_name)
+                  FILTER (WHERE a.class_name IS NOT NULL),
+                '{}'
+              ) AS classes
+       FROM users u
+       LEFT JOIN teacher_class_assignments a ON a.teacher_id = u.id
+       WHERE u.role = 'teacher'
+       GROUP BY u.id, u.name, u.username
+       HAVING COUNT(a.id) > 0
+       ORDER BY u.name ASC`
+    );
+
+    res.json({
+      success: true,
+      assignments: result.rows.map((row) => ({
+        teacherId: row.teacher_id,
+        name: row.name,
+        username: row.username,
+        classes: row.classes || [],
+      })),
+    });
+  } catch (err) {
+    console.error('❌ [GET TEACHER ASSIGNMENTS]:', err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// DELETE /api/school/teacher-assignments
+// Ήπιος καθαρισμός: ΜΟΝΟ αναθέσεις (όχι τμήματα, όχι λογαριασμοί)
+router.delete('/teacher-assignments', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({
+      success: false,
+      message: 'Απαγορεύεται η πρόσβαση. Απαιτούνται δικαιώματα διαχειριστή.',
+    });
+  }
+
+  try {
+    const assignDel = await db.query('DELETE FROM teacher_class_assignments');
+
+    console.log(
+      `🗑️ [ADMIN] Καθαρισμός αναθέσεων: ${assignDel.rowCount} ` +
+        `(από ${req.user.username})`
+    );
+
+    res.json({
+      success: true,
+      message:
+        `Διαγράφηκαν ${assignDel.rowCount} αναθέσεις τμημάτων. ` +
+        `Τμήματα και λογαριασμοί εκπαιδευτικών παρέμειναν.`,
+      deleted: assignDel.rowCount,
+    });
+  } catch (err) {
+    console.error('❌ [DELETE TEACHER ASSIGNMENTS]:', err.message);
+    res.status(500).json({ success: false, message: err.message });
   }
 });
 

@@ -474,6 +474,12 @@ router.post('/users/delete-all-teachers', authenticateToken, async (req, res) =>
       });
     }
 
+    // Αναθέσεις τμημάτων (ρητά, πριν τη διαγραφή χρηστών)
+    const assignDel = await db.query(
+      `DELETE FROM teacher_class_assignments
+       WHERE teacher_id IN (SELECT id FROM users WHERE role = 'teacher')`
+    );
+
     // Locks εκπαιδευτικών
     await db.query(
       `DELETE FROM class_locks
@@ -486,13 +492,17 @@ router.post('/users/delete-all-teachers', authenticateToken, async (req, res) =>
     );
 
     console.log(
-      `🗑️ [ADMIN] Μαζική διαγραφή εκπαιδευτικών: ${del.rowCount} (από ${req.user.username})`
+      `🗑️ [ADMIN] Μαζική διαγραφή εκπαιδευτικών: ${del.rowCount}, ` +
+        `αναθέσεις: ${assignDel.rowCount} (από ${req.user.username})`
     );
 
     res.json({
       success: true,
-      message: `Διαγράφηκαν ${del.rowCount} λογαριασμοί εκπαιδευτικών. Ο διαχειριστής παρέμεινε.`,
+      message:
+        `Διαγράφηκαν ${del.rowCount} λογαριασμοί εκπαιδευτικών ` +
+        `και ${assignDel.rowCount} αναθέσεις τμημάτων. Ο διαχειριστής παρέμεινε.`,
       deleted: del.rowCount,
+      assignmentsDeleted: assignDel.rowCount,
     });
   } catch (err) {
     console.error('❌ [DELETE ALL TEACHERS]:', err.message);
@@ -551,5 +561,267 @@ router.delete('/users/:id', authenticateToken, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
+function looksLikeAssignmentsHeader(colA, colB) {
+  const a = String(colA || '').toLowerCase();
+  const b = String(colB || '').toLowerCase();
+  const words = [
+    'ονοματεπωνυμο',
+    'ονοματεπώνυμο',
+    'ονομα',
+    'όνομα',
+    'name',
+    'τμημα',
+    'τμήμα',
+    'τμηματα',
+    'τμήματα',
+    'class',
+    'classes',
+  ];
+  return words.some((w) => a.includes(w) || b.includes(w));
+}
+
+function splitFullName(fullName) {
+  const parts = String(fullName || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .split(' ')
+    .filter(Boolean);
+  if (parts.length === 0) return { surname: '', firstname: '' };
+  if (parts.length === 1) return { surname: parts[0], firstname: parts[0] };
+  return {
+    surname: parts.slice(0, -1).join(' '),
+    firstname: parts[parts.length - 1],
+  };
+}
+
+function parseClassList(raw) {
+  return String(raw || '')
+    .split(/[,;|/\n·•]+/)
+    .map((s) => s.trim().replace(/\s+/g, ''))
+    .filter(Boolean)
+    .map((s) => s.toLocaleUpperCase('el-GR'));
+}
+
+// ==========================================
+// POST /api/auth/users/import-assignments-excel
+// Excel: στήλη A = Ονοματεπώνυμο, στήλη B = Τμήματα (π.χ. Α1, Α3, ΒΘΣ1)
+// Δημιουργεί λογαριασμούς (ίδια λογική username/password) + αποθηκεύει αναθέσεις
+// ==========================================
+router.post(
+  '/users/import-assignments-excel',
+  authenticateToken,
+  upload.single('file'),
+  async (req, res) => {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Απαγορεύεται η πρόσβαση. Απαιτούνται δικαιώματα διαχειριστή.',
+      });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'Δεν απεστάλη αρχείο Excel.',
+      });
+    }
+
+    let client;
+    try {
+      const workbook = xlsx.read(req.file.buffer, { type: 'buffer' });
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+      const rows = xlsx.utils.sheet_to_json(worksheet, {
+        header: 1,
+        defval: '',
+      });
+
+      if (!rows || rows.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Το αρχείο είναι άδειο.',
+        });
+      }
+
+      const existingRes = await db.query(
+        `SELECT id, name, username FROM users WHERE role = 'teacher'`
+      );
+      const teachersByName = new Map(
+        existingRes.rows.map((r) => [
+          String(r.name).trim().toLocaleLowerCase('el-GR'),
+          r,
+        ])
+      );
+
+      const allUsersRes = await db.query('SELECT username FROM users');
+      const usedUsernames = new Set(
+        allUsersRes.rows.map((r) => String(r.username).toLowerCase())
+      );
+
+      const createdCredentials = [];
+      const reused = [];
+      const assignments = [];
+      const skipped = [];
+      const classesEnsured = new Set();
+
+      client = await db.getClient();
+      await client.query('BEGIN');
+
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        if (!row || row.length === 0) continue;
+
+        const fullNameRaw = row[0] != null ? String(row[0]).trim() : '';
+        const classesRaw = row[1] != null ? String(row[1]).trim() : '';
+
+        if (!fullNameRaw && !classesRaw) continue;
+        if (i === 0 && looksLikeAssignmentsHeader(fullNameRaw, classesRaw)) {
+          continue;
+        }
+
+        if (!fullNameRaw) {
+          skipped.push({ row: i + 1, reason: 'Λείπει ονοματεπώνυμο' });
+          continue;
+        }
+
+        const classNames = parseClassList(classesRaw);
+        if (classNames.length === 0) {
+          skipped.push({
+            row: i + 1,
+            reason: 'Λείπουν τμήματα',
+            name: fullNameRaw,
+          });
+          continue;
+        }
+
+        const fullName = fullNameRaw.replace(/\s+/g, ' ').trim();
+        const nameKey = fullName.toLocaleLowerCase('el-GR');
+        let teacher = teachersByName.get(nameKey);
+        let isNew = false;
+
+        if (!teacher) {
+          const { surname, firstname } = splitFullName(fullName);
+          let base = buildBaseUsername(firstname, surname);
+          let username = base;
+          let suffix = 2;
+          while (usedUsernames.has(username)) {
+            username = `${base}${suffix}`;
+            suffix += 1;
+            if (suffix > 99) {
+              username = `${base}${Date.now().toString().slice(-3)}`;
+              break;
+            }
+          }
+
+          const plainPassword = generatePassword(username);
+          const hashedPassword = await bcrypt.hash(plainPassword, 10);
+
+          const result = await client.query(
+            `INSERT INTO users (name, username, password, role, is_first_login)
+             VALUES ($1, $2, $3, 'teacher', TRUE)
+             RETURNING id, name, username, role`,
+            [fullName, username, hashedPassword]
+          );
+
+          teacher = result.rows[0];
+          usedUsernames.add(username);
+          teachersByName.set(nameKey, teacher);
+          isNew = true;
+          createdCredentials.push({
+            id: teacher.id,
+            name: fullName,
+            username,
+            password: plainPassword,
+          });
+        } else {
+          reused.push({
+            id: teacher.id,
+            name: teacher.name,
+            username: teacher.username,
+          });
+        }
+
+        // Αντικατάσταση αναθέσεων για αυτόν τον εκπαιδευτικό
+        await client.query(
+          `DELETE FROM teacher_class_assignments WHERE teacher_id = $1`,
+          [teacher.id]
+        );
+
+        const teacherClasses = [];
+        for (const className of classNames) {
+          if (!classesEnsured.has(className)) {
+            await client.query(
+              `INSERT INTO classes (name) VALUES ($1)
+               ON CONFLICT (name) DO NOTHING`,
+              [className]
+            );
+            classesEnsured.add(className);
+          }
+
+          await client.query(
+            `INSERT INTO teacher_class_assignments (teacher_id, class_name)
+             VALUES ($1, $2)
+             ON CONFLICT (teacher_id, class_name) DO NOTHING`,
+            [teacher.id, className]
+          );
+          teacherClasses.push(className);
+        }
+
+        assignments.push({
+          teacherId: teacher.id,
+          name: fullName,
+          username: teacher.username,
+          classes: teacherClasses,
+          createdAccount: isNew,
+        });
+      }
+
+      if (assignments.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          success: false,
+          message:
+            'Δεν δημιουργήθηκαν αναθέσεις. Ελέγξτε ότι το Excel έχει Ονοματεπώνυμο | Τμήματα.',
+          skipped,
+        });
+      }
+
+      await client.query('COMMIT');
+
+      console.log(
+        `👤 [ADMIN] Assignments import: ${assignments.length} εκπαιδευτικοί, ` +
+          `${createdCredentials.length} νέοι λογαριασμοί, ` +
+          `${classesEnsured.size} τμήματα`
+      );
+
+      res.json({
+        success: true,
+        message:
+          `Ανατέθηκαν τμήματα σε ${assignments.length} εκπαιδευτικούς. ` +
+          `Νέοι λογαριασμοί: ${createdCredentials.length}. ` +
+          `Υπάρχοντες: ${reused.length}.`,
+        count: assignments.length,
+        createdCount: createdCredentials.length,
+        reusedCount: reused.length,
+        credentials: createdCredentials,
+        assignments,
+        skipped,
+      });
+    } catch (err) {
+      if (client) {
+        try {
+          await client.query('ROLLBACK');
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      console.error('❌ [IMPORT ASSIGNMENTS]:', err.message);
+      res.status(500).json({ success: false, message: err.message });
+    } finally {
+      if (client) client.release();
+    }
+  }
+);
 
 module.exports = router;

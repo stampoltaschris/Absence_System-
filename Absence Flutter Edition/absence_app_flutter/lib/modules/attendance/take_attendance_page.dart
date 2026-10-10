@@ -37,6 +37,8 @@ class _TakeAttendancePageState extends State<TakeAttendancePage>
   Timer? _selectionReminderTimer;
   Timer? _deadlineCheckTimer;
   Timer? _alertSoundTimer;
+  /// Μετά το «Εντάξει» δεν ξαναεμφανίζεται μέχρι αυτή τη στιγμή.
+  DateTime? _reminderSnoozeUntil;
   late final AnimationController _flashController;
   late final AudioPlayer _alertPlayer;
   late final DateTime _pageOpenedAt;
@@ -45,6 +47,10 @@ class _TakeAttendancePageState extends State<TakeAttendancePage>
 
   bool get _hasAnyMarked =>
       _students.any((s) => s['absent'] == true);
+
+  bool get _isSnoozed =>
+      _reminderSnoozeUntil != null &&
+      DateTime.now().isBefore(_reminderSnoozeUntil!);
 
   @override
   void initState() {
@@ -100,19 +106,29 @@ class _TakeAttendancePageState extends State<TakeAttendancePage>
   }
 
   DateTime _resolveAllPresentDeadline() {
-    final fromSchedule = SchoolSchedule.getSubmitReminderDeadline(
+    final liveHour = SchoolSchedule.getCurrentSchoolHour();
+    final inTeachingHour = SchoolSchedule.isTeachingHour(liveHour);
+    final periodIsTeachingHour = SchoolSchedule.isTeachingHour(
       widget.currentPeriod,
     );
-    final inTeachingHour = SchoolSchedule.isTeachingHour(
-      SchoolSchedule.getCurrentSchoolHour(),
-    );
 
-    // Εκτός ωραρίου / test mode: 15′ από το άνοιγμα της οθόνης
-    if (SchoolSchedule.forceTestMode && !inTeachingHour) {
+    // Σάββατο / εκτός ωραρίου / διάλειμμα / μη-διδακτική περίοδος:
+    // μην χρησιμοποιείς προθεσμία ωρολογίου της ημέρας (π.χ. 08:30) που
+    // έχει ήδη περάσει — αλλιώς η ειδοποίηση ανάβει αμέσως σε βρόχο.
+    if (!inTeachingHour || !periodIsTeachingHour) {
       return _pageOpenedAt.add(const Duration(minutes: 15));
     }
 
+    final fromSchedule = SchoolSchedule.getSubmitReminderDeadline(
+      widget.currentPeriod,
+    );
+
     if (fromSchedule != null) {
+      // Αν ανοίξαμε μετά την προθεσμία, δώσε χάρη 2′ από το άνοιγμα
+      // αντί για άμεσο alert (π.χ. είσοδος στις 13:10 με προθεσμία 12:55).
+      if (!fromSchedule.isAfter(_pageOpenedAt)) {
+        return _pageOpenedAt.add(const Duration(minutes: 2));
+      }
       return fromSchedule;
     }
     return _pageOpenedAt.add(const Duration(minutes: 15));
@@ -120,6 +136,7 @@ class _TakeAttendancePageState extends State<TakeAttendancePage>
 
   void _checkDeadlineReminder() {
     if (_hourlyOnly || _hasSubmitted || _showSubmitReminder) return;
+    if (_isSnoozed) return;
     // Περίπτωση β: χωρίς επιλεγμένους απόντες → υπενθύμιση στην προθεσμία (π.χ. 08:30)
     if (_hasAnyMarked) return;
 
@@ -130,7 +147,9 @@ class _TakeAttendancePageState extends State<TakeAttendancePage>
   }
 
   Future<void> _triggerSubmitReminder() async {
-    if (!mounted || _hasSubmitted || _showSubmitReminder) return;
+    if (!mounted || _hasSubmitted || _showSubmitReminder || _isSnoozed) {
+      return;
+    }
 
     setState(() => _showSubmitReminder = true);
     _flashController.repeat(reverse: true);
@@ -163,20 +182,24 @@ class _TakeAttendancePageState extends State<TakeAttendancePage>
   void _dismissSubmitReminder() {
     _stopAlertEffects();
     if (!mounted) return;
+
+    // Snooze και για «όλοι παρόντες» και για επιλεγμένους απόντες —
+    // αλλιώς ο περιοδικός έλεγχος (κάθε 5″) ξαναανάβει αμέσως το alert
+    // όταν η προθεσμία έχει ήδη περάσει.
+    _reminderSnoozeUntil = DateTime.now().add(const Duration(minutes: 2));
     setState(() => _showSubmitReminder = false);
 
-    // Επανάληψη σε 2′ αν ακόμα δεν έχει γίνει αποστολή
-    if (_hasAnyMarked) {
-      _selectionReminderTimer?.cancel();
-      _selectionReminderTimer = Timer(const Duration(minutes: 2), () {
-        if (!mounted || _hasSubmitted) return;
-        if (_hasAnyMarked) _triggerSubmitReminder();
-      });
-    }
+    _selectionReminderTimer?.cancel();
+    _selectionReminderTimer = Timer(const Duration(minutes: 2), () {
+      if (!mounted || _hasSubmitted) return;
+      _reminderSnoozeUntil = null;
+      _triggerSubmitReminder();
+    });
   }
 
   void _clearReminderStateAfterSubmit() {
     _hasSubmitted = true;
+    _reminderSnoozeUntil = null;
     _selectionReminderTimer?.cancel();
     _deadlineCheckTimer?.cancel();
     _stopAlertEffects();

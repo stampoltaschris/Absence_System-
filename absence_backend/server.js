@@ -111,7 +111,7 @@ app.post('/api/admin/reset-database', authenticateToken, async (req, res) => {
 
     // 2. Διαγραφή όλων των δεδομένων και μηδενισμός των IDs (CASCADE)
     await db.query(
-      'TRUNCATE TABLE attendance, students, classes, users, submitted_attendance, class_locks RESTART IDENTITY CASCADE'
+      'TRUNCATE TABLE attendance, students, classes, users, submitted_attendance, class_locks, teacher_class_assignments RESTART IDENTITY CASCADE'
     );
 
     // 3. Δημιουργία αρχικού λογαριασμού Admin με bcrypt hashed κωδικό 'admin' (ID = 1)

@@ -47,6 +47,28 @@ async function ensureClassLocksTable() {
   console.log('✓ Πίνακας class_locks έτοιμος');
 }
 
+/** Αναθέσεις τμημάτων σε εκπαιδευτικούς (από ωρολόγιο / Excel). */
+async function ensureTeacherAssignmentsTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS teacher_class_assignments (
+      id SERIAL PRIMARY KEY,
+      teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      class_name TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (teacher_id, class_name)
+    )
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_tca_teacher
+    ON teacher_class_assignments (teacher_id)
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_tca_class
+    ON teacher_class_assignments (class_name)
+  `);
+  console.log('✓ Πίνακας teacher_class_assignments έτοιμος');
+}
+
 /** Στήλη ωριαίας απομάκρυνσης + αρκετό μήκος για email_status. */
 async function ensureAttendanceSchema() {
   await pool.query(`
@@ -63,6 +85,7 @@ async function ensureAttendanceSchema() {
 
 async function ensureSchema() {
   await ensureClassLocksTable();
+  await ensureTeacherAssignmentsTable();
   await ensureAttendanceSchema();
 }
 
@@ -70,6 +93,7 @@ module.exports = {
   // Απλά queries
   query: (text, params) => pool.query(text, params),
   ensureClassLocksTable,
+  ensureTeacherAssignmentsTable,
   ensureAttendanceSchema,
   ensureSchema,
 

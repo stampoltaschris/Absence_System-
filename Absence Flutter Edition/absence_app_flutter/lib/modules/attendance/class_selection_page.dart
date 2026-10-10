@@ -1,8 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../core/app_theme.dart';
 import '../../core/school_schedule.dart';
 import '../../services/api_service.dart';
 import 'take_attendance_page.dart';
@@ -230,126 +232,289 @@ class _ClassSelectionPageState extends State<ClassSelectionPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('Επιλογή Τμήματος ($_currentSchoolHour)'),
-        backgroundColor: Colors.blue.shade700,
-        foregroundColor: Colors.white,
+        title: Text('Επιλογή Τμήματος · $_currentSchoolHour'),
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : shouldBlockUI
-          ? Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24.0),
-                child: Text(
-                  'Αυτή τη στιγμή είναι $_currentSchoolHour.\nΔεν επιτρέπεται η καταγραφή απουσιών.',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.red,
-                  ),
-                ),
-              ),
-            )
-          : GridView.builder(
-              padding: const EdgeInsets.all(16),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 3,
-                childAspectRatio: 1.3,
-                crossAxisSpacing: 16,
-                mainAxisSpacing: 16,
-              ),
-              itemCount: _classes.length,
-              itemBuilder: (context, index) {
-                final cls = _classes[index];
-                final String className = cls['name'] ?? '';
-                final bool isSubmitted = cls['isSubmitted'] ?? false;
-                final bool isLocked = cls['isLocked'] ?? false;
-                final String? lockedBy = cls['lockedBy'];
-
-                Color cardColor = Colors.white;
-                Color textColor = Colors.black;
-                String statusText = 'Διαθέσιμο';
-
-                final submittedByTeacherId = cls['submittedByTeacherId'] is int
-                    ? cls['submittedByTeacherId'] as int
-                    : int.tryParse('${cls['submittedByTeacherId'] ?? ''}');
-                final lockedByUserId = cls['lockedByUserId'] is int
-                    ? cls['lockedByUserId'] as int
-                    : int.tryParse('${cls['lockedByUserId'] ?? ''}');
-
-                if (isSubmitted) {
-                  cardColor = Colors.purple.shade50;
-                  textColor = Colors.purple.shade900;
-                  statusText = 'Υποβλήθηκε · Ωριαία απομάκρυνση';
-                } else if (isLocked) {
-                  cardColor = Colors.amber.shade100;
-                  textColor = Colors.amber.shade900;
-                  statusText = 'Σε χρήση ($lockedBy)';
-                }
-
-                return Card(
-                  color: cardColor,
-                  elevation: 2,
-                  child: InkWell(
-                    onTap: () => _selectClass(
-                      className,
-                      isLocked,
-                      isSubmitted,
-                      lockedBy,
-                      submittedByTeacherId: submittedByTeacherId,
-                      lockedByUserId: lockedByUserId,
+      body: Container(
+        decoration: AppTheme.pageBackground(),
+        child: _isLoading
+            ? const Center(child: CircularProgressIndicator())
+            : shouldBlockUI
+            ? Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(28),
+                  child: Container(
+                    padding: const EdgeInsets.all(24),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: AppColors.danger.withValues(alpha: 0.3),
+                      ),
                     ),
-                    child: Stack(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        Center(
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 8),
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Text(
-                                  className,
-                                  style: TextStyle(
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.bold,
-                                    color: textColor,
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  statusText,
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                    color: textColor,
-                                    fontSize: 12,
-                                  ),
-                                ),
-                              ],
-                            ),
+                        Icon(
+                          Icons.schedule_rounded,
+                          size: 48,
+                          color: AppColors.danger,
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          'Αυτή τη στιγμή είναι $_currentSchoolHour.\n'
+                          'Δεν επιτρέπεται η καταγραφή απουσιών.',
+                          textAlign: TextAlign.center,
+                          style: GoogleFonts.sora(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w700,
+                            color: AppColors.danger,
+                            height: 1.35,
                           ),
                         ),
-                        // Μόνο admin: ξεκλείδωμα «κολλημένου» τμήματος
-                        if (_isAdmin && isLocked && !isSubmitted)
-                          Positioned(
-                            top: 4,
-                            right: 4,
-                            child: IconButton(
-                              tooltip: 'Ξεκλείδωμα (μόνο διαχειριστής)',
-                              icon: Icon(
-                                Icons.lock_open,
-                                color: Colors.orange.shade900,
-                              ),
-                              onPressed: () =>
-                                  _adminForceUnlock(className, lockedBy),
-                            ),
-                          ),
                       ],
                     ),
                   ),
-                );
-              },
-            ),
+                ),
+              )
+            : Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                    child: Row(
+                      children: [
+                        _LegendDot(color: AppColors.availableBorder, label: 'Διαθέσιμο'),
+                        const SizedBox(width: 14),
+                        _LegendDot(color: AppColors.locked, label: 'Σε χρήση'),
+                        const SizedBox(width: 14),
+                        _LegendDot(color: AppColors.submittedInk, label: 'Υποβλήθηκε'),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: _classes.isEmpty
+                        ? Center(
+                            child: Padding(
+                              padding: const EdgeInsets.all(28),
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    Icons.assignment_late_outlined,
+                                    size: 56,
+                                    color: Colors.grey.shade400,
+                                  ),
+                                  const SizedBox(height: 16),
+                                  Text(
+                                    _isAdmin
+                                        ? 'Δεν υπάρχουν τμήματα στη βάση.'
+                                        : 'Δεν σας έχουν ανατεθεί τμήματα.\n'
+                                            'Επικοινωνήστε με τον διαχειριστή.',
+                                    textAlign: TextAlign.center,
+                                    style: GoogleFonts.sora(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w600,
+                                      color: AppColors.muted,
+                                      height: 1.35,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          )
+                        : LayoutBuilder(
+                      builder: (context, constraints) {
+                        final cols = constraints.maxWidth >= 1000
+                            ? 4
+                            : (constraints.maxWidth >= 700 ? 3 : 2);
+                        return GridView.builder(
+                          padding: const EdgeInsets.all(16),
+                          gridDelegate:
+                              SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: cols,
+                            childAspectRatio: 1.25,
+                            crossAxisSpacing: 14,
+                            mainAxisSpacing: 14,
+                          ),
+                          itemCount: _classes.length,
+                          itemBuilder: (context, index) {
+                            final cls = _classes[index];
+                            final String className = cls['name'] ?? '';
+                            final bool isSubmitted =
+                                cls['isSubmitted'] ?? false;
+                            final bool isLocked = cls['isLocked'] ?? false;
+                            final String? lockedBy = cls['lockedBy'];
+
+                            Color cardColor = AppColors.available;
+                            Color textColor = AppColors.ink;
+                            Color borderColor = AppColors.availableBorder;
+                            String statusText = 'Διαθέσιμο';
+                            IconData statusIcon = Icons.circle_outlined;
+
+                            final submittedByTeacherId =
+                                cls['submittedByTeacherId'] is int
+                                    ? cls['submittedByTeacherId'] as int
+                                    : int.tryParse(
+                                        '${cls['submittedByTeacherId'] ?? ''}',
+                                      );
+                            final lockedByUserId = cls['lockedByUserId'] is int
+                                ? cls['lockedByUserId'] as int
+                                : int.tryParse(
+                                    '${cls['lockedByUserId'] ?? ''}',
+                                  );
+
+                            if (isSubmitted) {
+                              cardColor = AppColors.submitted;
+                              textColor = AppColors.submittedInk;
+                              borderColor = AppColors.primaryMid
+                                  .withValues(alpha: 0.35);
+                              statusText = 'Υποβλήθηκε · Ωριαία';
+                              statusIcon = Icons.check_circle_rounded;
+                            } else if (isLocked) {
+                              cardColor = AppColors.locked;
+                              textColor = AppColors.lockedInk;
+                              borderColor = AppColors.warning
+                                  .withValues(alpha: 0.35);
+                              statusText = 'Σε χρήση ($lockedBy)';
+                              statusIcon = Icons.lock_rounded;
+                            }
+
+                            return Material(
+                              color: cardColor,
+                              borderRadius: BorderRadius.circular(18),
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(18),
+                                onTap: () => _selectClass(
+                                  className,
+                                  isLocked,
+                                  isSubmitted,
+                                  lockedBy,
+                                  submittedByTeacherId: submittedByTeacherId,
+                                  lockedByUserId: lockedByUserId,
+                                ),
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    borderRadius: BorderRadius.circular(18),
+                                    border: Border.all(
+                                      color: borderColor,
+                                      width: 1.4,
+                                    ),
+                                  ),
+                                  child: Stack(
+                                    children: [
+                                      Center(
+                                        child: Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 10,
+                                          ),
+                                          child: Column(
+                                            mainAxisAlignment:
+                                                MainAxisAlignment.center,
+                                            children: [
+                                              Text(
+                                                className,
+                                                style: GoogleFonts.sora(
+                                                  fontSize: 24,
+                                                  fontWeight: FontWeight.w700,
+                                                  color: textColor,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 8),
+                                              Row(
+                                                mainAxisAlignment:
+                                                    MainAxisAlignment.center,
+                                                children: [
+                                                  Icon(
+                                                    statusIcon,
+                                                    size: 14,
+                                                    color: textColor,
+                                                  ),
+                                                  const SizedBox(width: 4),
+                                                  Flexible(
+                                                    child: Text(
+                                                      statusText,
+                                                      textAlign:
+                                                          TextAlign.center,
+                                                      style:
+                                                          GoogleFonts.manrope(
+                                                        color: textColor,
+                                                        fontSize: 12,
+                                                        fontWeight:
+                                                            FontWeight.w600,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                      if (_isAdmin &&
+                                          isLocked &&
+                                          !isSubmitted)
+                                        Positioned(
+                                          top: 2,
+                                          right: 2,
+                                          child: IconButton(
+                                            tooltip:
+                                                'Ξεκλείδωμα (μόνο διαχειριστής)',
+                                            icon: Icon(
+                                              Icons.lock_open_rounded,
+                                              color: AppColors.warning,
+                                            ),
+                                            onPressed: () => _adminForceUnlock(
+                                              className,
+                                              lockedBy,
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+      ),
+    );
+  }
+}
+
+class _LegendDot extends StatelessWidget {
+  final Color color;
+  final String label;
+
+  const _LegendDot({required this.color, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 12,
+          height: 12,
+          decoration: BoxDecoration(
+            color: color,
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(color: AppColors.availableBorder),
+          ),
+        ),
+        const SizedBox(width: 6),
+        Text(
+          label,
+          style: GoogleFonts.manrope(
+            fontSize: 12,
+            color: AppColors.muted,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
     );
   }
 }

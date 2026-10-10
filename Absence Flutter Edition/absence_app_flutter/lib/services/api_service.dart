@@ -349,6 +349,40 @@ class ApiService {
     }
   }
 
+  static Future<Map<String, dynamic>> deleteAllClasses() async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/school/classes/delete-all'),
+            headers: headers,
+            body: jsonEncode({}),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      final data = response.body.isNotEmpty ? jsonDecode(response.body) : {};
+      if (response.statusCode == 200 && data is Map) {
+        return {
+          'success': data['success'] == true,
+          'message': data['message'] ?? 'Ολοκληρώθηκε.',
+          'deleted': data['deleted'] ?? 0,
+        };
+      }
+      return {
+        'success': false,
+        'message': data is Map
+            ? (data['message'] ?? 'Αποτυχία διαγραφής τμημάτων.')
+            : 'Αποτυχία διαγραφής τμημάτων.',
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'message': 'Σφάλμα διαγραφής τμημάτων: $e',
+      };
+    }
+  }
+
   static Future<Map<String, dynamic>> lockClass(
     String className,
     String currentHour,
@@ -545,6 +579,144 @@ class ApiService {
       return {
         'success': false,
         'message': 'Σφάλμα κατά την αποστολή του αρχείου στον Server: $e',
+      };
+    }
+  }
+
+  /// Excel αναθέσεων: στήλη A ονοματεπώνυμο, στήλη B τμήματα.
+  /// Δημιουργεί λογαριασμούς (όπως import teachers) + αποθηκεύει αναθέσεις.
+  static Future<Map<String, dynamic>> uploadTeacherAssignmentsExcel({
+    String? filePath,
+    List<int>? bytes,
+    String filename = 'assignments.xlsx',
+  }) async {
+    try {
+      if ((filePath == null || filePath.isEmpty) &&
+          (bytes == null || bytes.isEmpty)) {
+        return {
+          'success': false,
+          'message': 'Δεν επιλέχθηκε αρχείο (κενό path/bytes).',
+        };
+      }
+
+      final baseUrl = await getBaseUrl();
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('jwt_token') ?? '';
+
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('$baseUrl/auth/users/import-assignments-excel'),
+      );
+
+      if (token.isNotEmpty) {
+        request.headers['Authorization'] = 'Bearer $token';
+      }
+
+      if (bytes != null && bytes.isNotEmpty) {
+        request.files.add(
+          http.MultipartFile.fromBytes('file', bytes, filename: filename),
+        );
+      } else {
+        request.files.add(await http.MultipartFile.fromPath('file', filePath!));
+      }
+
+      final streamedResponse = await request.send().timeout(
+        const Duration(seconds: 60),
+      );
+      final response = await http.Response.fromStream(streamedResponse);
+      final data = response.body.isNotEmpty ? jsonDecode(response.body) : {};
+
+      if (response.statusCode == 200 && data is Map && data['success'] == true) {
+        return {
+          'success': true,
+          'message': data['message'] ?? 'Ολοκληρώθηκε η εισαγωγή.',
+          'count': data['count'] ?? 0,
+          'createdCount': data['createdCount'] ?? 0,
+          'reusedCount': data['reusedCount'] ?? 0,
+          'credentials': data['credentials'] ?? [],
+          'assignments': data['assignments'] ?? [],
+          'skipped': data['skipped'] ?? [],
+        };
+      }
+
+      return {
+        'success': false,
+        'message': data is Map
+            ? (data['message'] ?? 'Αποτυχία εισαγωγής αναθέσεων.')
+            : 'Αποτυχία εισαγωγής αναθέσεων.',
+        'skipped': data is Map ? (data['skipped'] ?? []) : [],
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'message': 'Σφάλμα κατά την αποστολή του αρχείου στον Server: $e',
+      };
+    }
+  }
+
+  static Future<Map<String, dynamic>> getTeacherAssignments() async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .get(
+            Uri.parse('$baseUrl/school/teacher-assignments'),
+            headers: headers,
+          )
+          .timeout(const Duration(seconds: 10));
+
+      final data = response.body.isNotEmpty ? jsonDecode(response.body) : {};
+      if (response.statusCode == 200 && data is Map) {
+        return {
+          'success': true,
+          'assignments': data['assignments'] ?? [],
+        };
+      }
+      return {
+        'success': false,
+        'message': data is Map
+            ? (data['message'] ?? 'Αποτυχία φόρτωσης αναθέσεων.')
+            : 'Αποτυχία φόρτωσης αναθέσεων.',
+        'assignments': [],
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'message': 'Σφάλμα φόρτωσης αναθέσεων: $e',
+        'assignments': [],
+      };
+    }
+  }
+
+  static Future<Map<String, dynamic>> clearTeacherAssignments() async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .delete(
+            Uri.parse('$baseUrl/school/teacher-assignments'),
+            headers: headers,
+          )
+          .timeout(const Duration(seconds: 10));
+
+      final data = response.body.isNotEmpty ? jsonDecode(response.body) : {};
+      if (response.statusCode == 200 && data is Map && data['success'] == true) {
+        return {
+          'success': true,
+          'message': data['message'] ?? 'Οι αναθέσεις διαγράφηκαν.',
+          'deleted': data['deleted'] ?? 0,
+        };
+      }
+      return {
+        'success': false,
+        'message': data is Map
+            ? (data['message'] ?? 'Αποτυχία διαγραφής.')
+            : 'Αποτυχία διαγραφής.',
+      };
+    } catch (e) {
+      return {
+        'success': false,
+        'message': 'Σφάλμα διαγραφής αναθέσεων: $e',
       };
     }
   }
