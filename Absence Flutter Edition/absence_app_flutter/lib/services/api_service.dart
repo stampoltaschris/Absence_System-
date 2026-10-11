@@ -188,6 +188,41 @@ class ApiService {
     }
   }
 
+  /// Ιδιότητα Ένταξης-Παράλληλης (συνυπάρχει στο τμήμα με κύριο εκπαιδευτικό).
+  static Future<Map<String, dynamic>> setTeacherInclusionParallel({
+    required int userId,
+    required bool enabled,
+  }) async {
+    try {
+      final baseUrl = await getBaseUrl();
+      final headers = await _getHeaders();
+      final response = await http
+          .patch(
+            Uri.parse('$baseUrl/auth/users/$userId/inclusion-parallel'),
+            headers: headers,
+            body: jsonEncode({'isInclusionParallel': enabled}),
+          )
+          .timeout(const Duration(seconds: 5));
+
+      final data = response.body.isNotEmpty ? jsonDecode(response.body) : {};
+      if (response.statusCode == 200 && data is Map && data['success'] == true) {
+        return {
+          'success': true,
+          'message': data['message'] ?? 'Ενημερώθηκε.',
+          'user': data['user'],
+        };
+      }
+      return {
+        'success': false,
+        'message': data is Map
+            ? (data['message'] ?? 'Αποτυχία ενημέρωσης.')
+            : 'Αποτυχία ενημέρωσης.',
+      };
+    } catch (e) {
+      return {'success': false, 'message': 'Σφάλμα σύνδεσης με τον server.'};
+    }
+  }
+
   static Future<Map<String, dynamic>> updateUser({
     required int userId,
     required String name,
@@ -294,7 +329,8 @@ class ApiService {
   }
 
   // --- 2. SCHOOL & CLASSES ---
-  static Future<List<dynamic>> getClasses([
+  /// Αποτέλεσμα με διάκριση: κενή λίστα ανάθεσης vs σφάλμα δικτύου/server.
+  static Future<Map<String, dynamic>> fetchClasses([
     String currentHour = '1η ώρα',
   ]) async {
     try {
@@ -311,12 +347,42 @@ class ApiService {
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        if (data is List) return data;
+        if (data is List) {
+          return {'success': true, 'classes': data, 'message': null};
+        }
+        return {
+          'success': false,
+          'classes': <dynamic>[],
+          'message': 'Μη έγκυρη απάντηση από τον server.',
+        };
       }
-      return [];
+      if (response.statusCode == 401 || response.statusCode == 403) {
+        return {
+          'success': false,
+          'classes': <dynamic>[],
+          'message': 'Η συνεδρία έληξε. Συνδεθείτε ξανά.',
+        };
+      }
+      return {
+        'success': false,
+        'classes': <dynamic>[],
+        'message': 'Αποτυχία φόρτωσης τμημάτων (κωδικός ${response.statusCode}).',
+      };
     } catch (e) {
-      return [];
+      return {
+        'success': false,
+        'classes': <dynamic>[],
+        'message': 'Σφάλμα σύνδεσης με τον server.',
+      };
     }
+  }
+
+  static Future<List<dynamic>> getClasses([
+    String currentHour = '1η ώρα',
+  ]) async {
+    final result = await fetchClasses(currentHour);
+    final classes = result['classes'];
+    return classes is List ? classes : <dynamic>[];
   }
 
   static Future<bool> insertClass(String className) async {
@@ -385,8 +451,9 @@ class ApiService {
 
   static Future<Map<String, dynamic>> lockClass(
     String className,
-    String currentHour,
-  ) async {
+    String currentHour, {
+    bool scheduleChangeConfirmed = false,
+  }) async {
     try {
       final baseUrl = await getBaseUrl();
       final headers = await _getHeaders();
@@ -399,6 +466,7 @@ class ApiService {
             body: jsonEncode({
               'className': className,
               'currentHour': currentHour,
+              'scheduleChangeConfirmed': scheduleChangeConfirmed,
               'userId': prefs.getInt('user_id') ?? 1,
               'userName': prefs.getString('username') ?? 'Εκπαιδευτικός',
             }),
@@ -794,14 +862,18 @@ class ApiService {
   static Future<Map<String, dynamic>> getAttendanceRecords({
     required String className,
     required String period,
+    bool scheduleChangeConfirmed = false,
   }) async {
     try {
       final baseUrl = await getBaseUrl();
       final headers = await _getHeaders();
+      final confirmedQ = scheduleChangeConfirmed
+          ? '&scheduleChangeConfirmed=true'
+          : '';
       final response = await http
           .get(
             Uri.parse(
-              '$baseUrl/attendance/records?className=${Uri.encodeComponent(className)}&period=${Uri.encodeComponent(period)}',
+              '$baseUrl/attendance/records?className=${Uri.encodeComponent(className)}&period=${Uri.encodeComponent(period)}$confirmedQ',
             ),
             headers: headers,
           )
@@ -821,6 +893,7 @@ class ApiService {
     required String className,
     required String period,
     required List<int> studentIds,
+    bool scheduleChangeConfirmed = false,
   }) async {
     try {
       final baseUrl = await getBaseUrl();
@@ -833,6 +906,7 @@ class ApiService {
               'className': className,
               'period': period,
               'studentIds': studentIds,
+              'scheduleChangeConfirmed': scheduleChangeConfirmed,
             }),
           )
           .timeout(const Duration(seconds: 5));
@@ -854,6 +928,7 @@ class ApiService {
     required String className,
     required String period,
     required List<Map<String, dynamic>> absences,
+    bool scheduleChangeConfirmed = false,
   }) async {
     try {
       final baseUrl = await getBaseUrl();
@@ -873,6 +948,7 @@ class ApiService {
               'absences': absences,
               'userRole': userRole,
               'teacherId': teacherId,
+              'scheduleChangeConfirmed': scheduleChangeConfirmed,
             }),
           )
           .timeout(const Duration(seconds: 5));

@@ -57,7 +57,23 @@ function getAthensDateString(date = new Date()) {
   return getAthensParts(date).dateString;
 }
 
+/** Ελληνικό όνομα ημέρας (Δευτέρα…Κυριακή) σε ώρα Athens. */
+function getAthensWeekdayName(date = new Date()) {
+  const { jsDay } = getAthensParts(date);
+  const names = [
+    'Κυριακή',
+    'Δευτέρα',
+    'Τρίτη',
+    'Τετάρτη',
+    'Πέμπτη',
+    'Παρασκευή',
+    'Σάββατο',
+  ];
+  return names[jsDay] || 'Κυριακή';
+}
+
 module.exports = {
   getAthensParts,
   getAthensDateString,
+  getAthensWeekdayName,
 };

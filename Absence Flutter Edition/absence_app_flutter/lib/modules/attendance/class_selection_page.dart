@@ -19,6 +19,8 @@ class ClassSelectionPage extends StatefulWidget {
 class _ClassSelectionPageState extends State<ClassSelectionPage> {
   List<dynamic> _classes = [];
   bool _isLoading = true;
+  /// null = OK, αλλιώς μήνυμα σφάλματος δικτύου/συνεδρίας (όχι «καμία ανάθεση»).
+  String? _loadError;
   Timer? _refreshTimer;
   late String _currentSchoolHour;
   bool _isAdmin = false; // 👉 Προσθήκη μεταβλητής για τον έλεγχο Admin
@@ -69,11 +71,23 @@ class _ClassSelectionPageState extends State<ClassSelectionPage> {
   Future<void> _fetchClasses({bool showLoading = true}) async {
     if (showLoading) setState(() => _isLoading = true);
 
-    final classesData = await ApiService.getClasses(_currentSchoolHour);
+    final result = await ApiService.fetchClasses(_currentSchoolHour);
+    final classesData = result['classes'] is List
+        ? result['classes'] as List<dynamic>
+        : <dynamic>[];
+    final ok = result['success'] == true;
+    final errMsg = ok ? null : (result['message'] as String?);
 
     if (mounted) {
       setState(() {
-        _classes = classesData;
+        if (ok) {
+          _classes = classesData;
+          _loadError = null;
+        } else if (showLoading || _classes.isEmpty) {
+          // Αρχική φόρτωση / κενή λίστα: δείξε σφάλμα, μην το μπερδέψεις με «καμία ανάθεση»
+          _loadError = errMsg;
+        }
+        // Περιοδικό refresh με ήδη φορτωμένα τμήματα: κράτα τη λίστα
         _isLoading = false;
       });
     }
@@ -86,6 +100,7 @@ class _ClassSelectionPageState extends State<ClassSelectionPage> {
     String? lockedBy, {
     int? submittedByTeacherId,
     int? lockedByUserId,
+    bool assignedThisHour = true,
   }) async {
     final canAttend =
         _isAdmin || SchoolSchedule.allowsTeacherAttendance(_currentSchoolHour);
@@ -126,15 +141,16 @@ class _ClassSelectionPageState extends State<ClassSelectionPage> {
       }
     }
 
-    // Μπλοκάρισμα μόνο αν το κρατά άλλος χρήστης.
-    // Αν το lock είναι δικό σου (π.χ. μετά από hot restart), επιτρέπεται επανείσοδος.
-    // Admin μπορεί να αναλάβει οποιοδήποτε lock.
+    // Άλλος ΚΥΡΙΟΣ εκπαιδευτικός μέσα → αποκλεισμός.
+    // Ένταξης-Παράλληλης μπορούν να συνυπάρχουν (δεν έρχονται ως isLocked).
     if (isLocked && lockedBy != null) {
       final isOwnLock = lockedByUserId != null && lockedByUserId == myId;
       if (!isOwnLock && !_isAdmin) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Το τμήμα $className το επεξεργάζεται ο/η $lockedBy.'),
+            content: Text(
+              'Το τμήμα $className το επεξεργάζεται ο κύριος εκπαιδευτικός $lockedBy.',
+            ),
             backgroundColor: Colors.red,
           ),
         );
@@ -142,10 +158,39 @@ class _ClassSelectionPageState extends State<ClassSelectionPage> {
       }
     }
 
+    // Δικό του τμήμα σήμερα, αλλά όχι στην τρέχουσα ώρα → επιβεβαίωση αλλαγής προγράμματος
+    var scheduleChangeConfirmed = false;
+    if (!_isAdmin && !assignedThisHour) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Αλλαγή προγράμματος;'),
+          content: Text(
+            'Το τμήμα $className δεν είναι στο ωρολόγιό σας για την '
+            '$_currentSchoolHour.\n\n'
+            'Έχει γίνει αλλαγή προγράμματος και διδάσκετε τώρα αυτό το τμήμα;',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Όχι'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Ναι, επιβεβαιώνω'),
+            ),
+          ],
+        ),
+      );
+      if (ok != true || !mounted) return;
+      scheduleChangeConfirmed = true;
+    }
+
     setState(() => _isLoading = true);
     final lockResult = await ApiService.lockClass(
       className,
       _currentSchoolHour,
+      scheduleChangeConfirmed: scheduleChangeConfirmed,
     );
     setState(() => _isLoading = false);
 
@@ -159,6 +204,7 @@ class _ClassSelectionPageState extends State<ClassSelectionPage> {
                 className: className,
                 currentPeriod: _currentSchoolHour,
                 hourlyRemovalOnly: isSubmitted,
+                scheduleChangeConfirmed: scheduleChangeConfirmed,
               ),
             ),
           )
@@ -284,14 +330,47 @@ class _ClassSelectionPageState extends State<ClassSelectionPage> {
                       children: [
                         _LegendDot(color: AppColors.availableBorder, label: 'Διαθέσιμο'),
                         const SizedBox(width: 14),
-                        _LegendDot(color: AppColors.locked, label: 'Σε χρήση'),
+                        _LegendDot(color: AppColors.locked, label: 'Κύριος μέσα'),
                         const SizedBox(width: 14),
                         _LegendDot(color: AppColors.submittedInk, label: 'Υποβλήθηκε'),
                       ],
                     ),
                   ),
                   Expanded(
-                    child: _classes.isEmpty
+                    child: _loadError != null
+                        ? Center(
+                            child: Padding(
+                              padding: const EdgeInsets.all(28),
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    Icons.wifi_off_rounded,
+                                    size: 56,
+                                    color: AppColors.danger.withValues(alpha: 0.7),
+                                  ),
+                                  const SizedBox(height: 16),
+                                  Text(
+                                    _loadError!,
+                                    textAlign: TextAlign.center,
+                                    style: GoogleFonts.sora(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w600,
+                                      color: AppColors.danger,
+                                      height: 1.35,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 16),
+                                  TextButton.icon(
+                                    onPressed: () => _fetchClasses(),
+                                    icon: const Icon(Icons.refresh_rounded),
+                                    label: const Text('Επανάληψη'),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          )
+                        : _classes.isEmpty
                         ? Center(
                             child: Padding(
                               padding: const EdgeInsets.all(28),
@@ -307,8 +386,12 @@ class _ClassSelectionPageState extends State<ClassSelectionPage> {
                                   Text(
                                     _isAdmin
                                         ? 'Δεν υπάρχουν τμήματα στη βάση.'
-                                        : 'Δεν σας έχουν ανατεθεί τμήματα.\n'
-                                            'Επικοινωνήστε με τον διαχειριστή.',
+                                        : 'Δεν έχετε τμήμα σήμερα '
+                                            '($_currentSchoolHour).\n\n'
+                                            'Εμφανίζονται μόνο τμήματα του '
+                                            'ωρολογίου σας για σήμερα. '
+                                            'Άλλη ώρα επιτρέπεται μόνο με '
+                                            'επιβεβαίωση αλλαγής προγράμματος.',
                                     textAlign: TextAlign.center,
                                     style: GoogleFonts.sora(
                                       fontSize: 16,
@@ -343,12 +426,18 @@ class _ClassSelectionPageState extends State<ClassSelectionPage> {
                                 cls['isSubmitted'] ?? false;
                             final bool isLocked = cls['isLocked'] ?? false;
                             final String? lockedBy = cls['lockedBy'];
+                            final bool assignedThisHour =
+                                cls['assignedThisHour'] != false;
 
                             Color cardColor = AppColors.available;
                             Color textColor = AppColors.ink;
                             Color borderColor = AppColors.availableBorder;
-                            String statusText = 'Διαθέσιμο';
-                            IconData statusIcon = Icons.circle_outlined;
+                            String statusText = assignedThisHour
+                                ? 'Διαθέσιμο'
+                                : 'Άλλη ώρα · επιβεβαίωση';
+                            IconData statusIcon = assignedThisHour
+                                ? Icons.circle_outlined
+                                : Icons.swap_horiz_rounded;
 
                             final submittedByTeacherId =
                                 cls['submittedByTeacherId'] is int
@@ -374,8 +463,17 @@ class _ClassSelectionPageState extends State<ClassSelectionPage> {
                               textColor = AppColors.lockedInk;
                               borderColor = AppColors.warning
                                   .withValues(alpha: 0.35);
-                              statusText = 'Σε χρήση ($lockedBy)';
+                              statusText = 'Κύριος μέσα ($lockedBy)';
                               statusIcon = Icons.lock_rounded;
+                            } else {
+                              final parallel = cls['parallelPresent'];
+                              if (parallel is List && parallel.isNotEmpty) {
+                                statusText =
+                                    'Παράλληλη: ${parallel.join(', ')}';
+                                statusIcon = Icons.groups_rounded;
+                                borderColor = Colors.indigo
+                                    .withValues(alpha: 0.35);
+                              }
                             }
 
                             return Material(
@@ -390,6 +488,7 @@ class _ClassSelectionPageState extends State<ClassSelectionPage> {
                                   lockedBy,
                                   submittedByTeacherId: submittedByTeacherId,
                                   lockedByUserId: lockedByUserId,
+                                  assignedThisHour: assignedThisHour,
                                 ),
                                 child: Container(
                                   decoration: BoxDecoration(

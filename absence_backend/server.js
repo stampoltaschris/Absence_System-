@@ -5,12 +5,10 @@ const bcrypt = require('bcrypt'); // 1. Διορθώθηκε: Χρήση του 
 const jwt = require('jsonwebtoken'); // Προσθήκη για την έκδοση νέου token μετά το reset
 require('dotenv').config();
 const db = require('./db');
+const { JWT_SECRET } = require('./utils/jwt_secret');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-
-// 🔒 Ενιαίο JWT Secret Key
-const JWT_SECRET = process.env.JWT_SECRET || 'fallback_school_attendance_jwt_secret_key_2026';
 
 // Middleware
 app.use(cors());

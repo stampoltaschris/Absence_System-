@@ -4,7 +4,10 @@ const multer = require('multer');
 const xlsx = require('xlsx');
 const db = require('../db');
 const authenticateToken = require('../middleware/auth'); // Προσθήκη για ασφάλεια
-const { getAthensDateString } = require('../utils/athens_time');
+const {
+  getAthensDateString,
+  getAthensWeekdayName,
+} = require('../utils/athens_time');
 const {
   getClassesForUser,
   teacherCanAccessClass,
@@ -36,8 +39,12 @@ router.get('/classes', authenticateToken, async (req, res) => {
   try {
     await purgeStaleLocks();
 
-    // Εκπαιδευτικός: μόνο τα τμήματα που του έχουν ανατεθεί · Admin: όλα
-    const classes = await getClassesForUser(req.user);
+    const weekday = getAthensWeekdayName();
+    // Εκπαιδευτικός: τμήματα για σήμερα + τρέχουσα ώρα · Admin: όλα
+    const classes = await getClassesForUser(req.user, {
+      weekday,
+      schoolHour: currentHour,
+    });
 
     const submittedRes = await db.query(
       'SELECT class_name FROM submitted_attendance WHERE date = $1 AND school_hour = $2',
@@ -58,27 +65,49 @@ router.get('/classes', authenticateToken, async (req, res) => {
     );
 
     const locksRes = await db.query(
-      'SELECT class_name, user_id, user_name FROM class_locks WHERE school_hour = $1',
+      `SELECT cl.class_name, cl.user_id, cl.user_name,
+              COALESCE(u.is_inclusion_parallel, FALSE) AS is_inclusion_parallel
+       FROM class_locks cl
+       LEFT JOIN users u ON u.id = cl.user_id
+       WHERE cl.school_hour = $1`,
       [currentHour]
     );
-    const lockByClass = new Map(
-      locksRes.rows.map((row) => [
-        row.class_name,
-        { userId: row.user_id, userName: row.user_name },
-      ])
-    );
+    /** @type {Map<string, Array<{userId:number, userName:string, isInclusionParallel:boolean}>>} */
+    const locksByClass = new Map();
+    for (const row of locksRes.rows) {
+      const list = locksByClass.get(row.class_name) || [];
+      list.push({
+        userId: parseInt(row.user_id, 10),
+        userName: row.user_name,
+        isInclusionParallel: Boolean(row.is_inclusion_parallel),
+      });
+      locksByClass.set(row.class_name, list);
+    }
+
+    const myId = parseInt(req.user?.id, 10);
 
     const result = classes.map(cls => {
-      const lock = lockByClass.get(cls.name) || null;
+      const holders = locksByClass.get(cls.name) || [];
+      const others = holders.filter((h) => h.userId !== myId);
+      const otherMains = others.filter((h) => !h.isInclusionParallel);
+      const otherParallel = others.filter((h) => h.isInclusionParallel);
+      const names = holders.map((h) => h.userName).filter(Boolean);
 
       return {
         id: cls.id,
         name: cls.name,
+        // true = ανάθεση ακριβώς για την τρέχουσα ώρα · false = δικό του σήμερα, άλλη ώρα
+        assignedThisHour: cls.assignedThisHour !== false,
         isSubmitted: submittedSet.has(cls.name),
         submittedByTeacherId: submitterByClass.get(cls.name) || null,
-        isLocked: !!lock,
-        lockedBy: lock ? lock.userName : null,
-        lockedByUserId: lock ? lock.userId : null,
+        // isLocked = άλλος ΚΥΡΙΟΣ μέσα (αποκλεισμός για άλλους κύριους)
+        isLocked: otherMains.length > 0,
+        lockedBy: otherMains.map((h) => h.userName).join(', ') || null,
+        lockedByUserId: otherMains[0]?.userId || null,
+        // Ένταξης-Παράλληλης μέσα (ενημερωτικό — δεν αποκλείει)
+        parallelPresent: otherParallel.map((h) => h.userName),
+        lockedByUsers: holders,
+        lockedByNames: names,
       };
     });
 
@@ -203,7 +232,7 @@ router.delete('/classes/:id', authenticateToken, async (req, res) => {
 // ==========================================
 
 router.post('/lock-class', authenticateToken, async (req, res) => {
-  const { className, currentHour } = req.body;
+  const { className, currentHour, scheduleChangeConfirmed } = req.body;
   const userId = req.user?.id;
   const userName =
     req.user?.username ||
@@ -231,30 +260,51 @@ router.post('/lock-class', authenticateToken, async (req, res) => {
     const isAdmin = req.user?.role === 'admin';
 
     if (!isAdmin) {
-      const allowed = await teacherCanAccessClass(req.user, className);
+      const allowed = await teacherCanAccessClass(req.user, className, {
+        weekday: getAthensWeekdayName(),
+        schoolHour: currentHour,
+        scheduleChangeConfirmed: scheduleChangeConfirmed === true,
+      });
       if (!allowed) {
         return res.status(403).json({
           success: false,
           message:
-            `Δεν έχετε ανάθεση στο τμήμα ${className}. ` +
-            'Επιτρέπονται μόνο τα τμήματα που σας έχουν ανατεθεί.',
+            `Δεν έχετε ανάθεση στο τμήμα ${className} ` +
+            `για ${getAthensWeekdayName()} / ${currentHour}. ` +
+            `Επιτρέπονται μόνο δικά σας τμήματα· για άλλη ώρα απαιτείται επιβεβαίωση αλλαγής προγράμματος.`,
         });
       }
     }
 
-    const existing = await db.query(
-      'SELECT user_id, user_name FROM class_locks WHERE class_name = $1 AND school_hour = $2',
-      [className, currentHour]
+    // Συνδιδασκαλία μόνο με ιδιότητα Ένταξης-Παράλληλης.
+    // Κύριοι (is_inclusion_parallel=false): το πολύ ένας κύριος μέσα.
+    // Ένταξης-Παράλληλης (true): μπορούν να συνυπάρχουν με κύριο ή μεταξύ τους.
+    const meRes = await db.query(
+      `SELECT COALESCE(is_inclusion_parallel, FALSE) AS is_inclusion_parallel
+       FROM users WHERE id = $1`,
+      [myId]
+    );
+    const iAmParallel = Boolean(meRes.rows[0]?.is_inclusion_parallel);
+
+    const holders = await db.query(
+      `SELECT cl.user_id, cl.user_name,
+              COALESCE(u.is_inclusion_parallel, FALSE) AS is_inclusion_parallel
+       FROM class_locks cl
+       LEFT JOIN users u ON u.id = cl.user_id
+       WHERE cl.class_name = $1 AND cl.school_hour = $2 AND cl.user_id <> $3`,
+      [className, currentHour, myId]
     );
 
-    if (existing.rows.length > 0) {
-      const holderId = parseInt(existing.rows[0].user_id, 10);
-      // Ίδιος χρήστης: επιτρέπεται επανείσοδος (π.χ. μετά από hot restart)
-      // Admin: μπορεί να αναλάβει ξένο lock
-      if (holderId !== myId && !isAdmin) {
+    if (!isAdmin && !iAmParallel) {
+      const otherMain = holders.rows.find(
+        (r) => !Boolean(r.is_inclusion_parallel)
+      );
+      if (otherMain) {
         return res.status(400).json({
           success: false,
-          message: `Το τμήμα ${className} το επεξεργάζεται ο/η ${existing.rows[0].user_name}.`,
+          message:
+            `Το τμήμα ${className} το επεξεργάζεται ήδη ο κύριος εκπαιδευτικός ` +
+            `${otherMain.user_name}. Συνυπάρχουν μόνο εκπαιδευτικοί Ένταξης-Παράλληλης.`,
         });
       }
     }
@@ -262,14 +312,23 @@ router.post('/lock-class', authenticateToken, async (req, res) => {
     await db.query(
       `INSERT INTO class_locks (class_name, school_hour, user_id, user_name, locked_at)
        VALUES ($1, $2, $3, $4, NOW())
-       ON CONFLICT (class_name, school_hour) DO UPDATE SET
-         user_id = EXCLUDED.user_id,
+       ON CONFLICT (class_name, school_hour, user_id) DO UPDATE SET
          user_name = EXCLUDED.user_name,
          locked_at = NOW()`,
-      [className, currentHour, userId, userName]
+      [className, currentHour, myId, userName]
     );
 
-    res.json({ success: true, message: 'Το τμήμα δεσμεύτηκε επιτυχώς.' });
+    const peerNames = holders.rows.map((r) => r.user_name).filter(Boolean);
+
+    res.json({
+      success: true,
+      message:
+        peerNames.length > 0
+          ? `Το τμήμα δεσμεύτηκε. Επίσης μέσα: ${peerNames.join(', ')}.`
+          : 'Το τμήμα δεσμεύτηκε επιτυχώς.',
+      alsoPresent: peerNames,
+      isInclusionParallel: iAmParallel,
+    });
   } catch (err) {
     console.error('❌ Σφάλμα δέσμευσης τμήματος:', err.message);
     res.status(500).json({ success: false, message: err.message });
@@ -288,6 +347,15 @@ router.post('/unlock-class', authenticateToken, async (req, res) => {
     });
   }
 
+  // Με αυστηρές αναθέσεις ημέρα+ώρα: ο εκπαιδευτικός ξεκλειδώνει μόνο το τρέχον slot.
+  // Admin χωρίς currentHour → έκτακτη αποδέσμευση όλων των ωρών του τμήματος.
+  if (!currentHour && !isAdmin) {
+    return res.status(400).json({
+      success: false,
+      message: 'Απαιτείται η διδακτική ώρα για αποδέσμευση.',
+    });
+  }
+
   try {
     if (currentHour) {
       if (isAdmin) {
@@ -301,13 +369,8 @@ router.post('/unlock-class', authenticateToken, async (req, res) => {
           [className, currentHour, userId]
         );
       }
-    } else if (isAdmin) {
-      await db.query('DELETE FROM class_locks WHERE class_name = $1', [className]);
     } else {
-      await db.query(
-        'DELETE FROM class_locks WHERE class_name = $1 AND user_id = $2',
-        [className, userId]
-      );
+      await db.query('DELETE FROM class_locks WHERE class_name = $1', [className]);
     }
 
     res.json({ success: true, message: 'Το τμήμα αποδεσμεύτηκε.' });
@@ -486,26 +549,53 @@ router.get('/teacher-assignments', authenticateToken, async (req, res) => {
   try {
     const result = await db.query(
       `SELECT u.id AS teacher_id, u.name, u.username,
-              COALESCE(
-                array_agg(a.class_name ORDER BY a.class_name)
-                  FILTER (WHERE a.class_name IS NOT NULL),
-                '{}'
-              ) AS classes
+              a.weekday, a.school_hour, a.class_name
        FROM users u
-       LEFT JOIN teacher_class_assignments a ON a.teacher_id = u.id
+       INNER JOIN teacher_class_assignments a ON a.teacher_id = u.id
        WHERE u.role = 'teacher'
-       GROUP BY u.id, u.name, u.username
-       HAVING COUNT(a.id) > 0
-       ORDER BY u.name ASC`
+       ORDER BY u.name ASC,
+         CASE a.weekday
+           WHEN 'Δευτέρα' THEN 1
+           WHEN 'Τρίτη' THEN 2
+           WHEN 'Τετάρτη' THEN 3
+           WHEN 'Πέμπτη' THEN 4
+           WHEN 'Παρασκευή' THEN 5
+           ELSE 9
+         END,
+         a.school_hour ASC,
+         a.class_name ASC`
     );
+
+    const byTeacher = new Map();
+    for (const row of result.rows) {
+      if (!byTeacher.has(row.teacher_id)) {
+        byTeacher.set(row.teacher_id, {
+          teacherId: row.teacher_id,
+          name: row.name,
+          username: row.username,
+          slots: [],
+          classes: new Set(),
+        });
+      }
+      const entry = byTeacher.get(row.teacher_id);
+      entry.slots.push({
+        weekday: row.weekday,
+        schoolHour: row.school_hour,
+        className: row.class_name,
+      });
+      entry.classes.add(row.class_name);
+    }
 
     res.json({
       success: true,
-      assignments: result.rows.map((row) => ({
-        teacherId: row.teacher_id,
-        name: row.name,
-        username: row.username,
-        classes: row.classes || [],
+      assignments: Array.from(byTeacher.values()).map((e) => ({
+        teacherId: e.teacherId,
+        name: e.name,
+        username: e.username,
+        slots: e.slots,
+        classes: Array.from(e.classes).sort((a, b) =>
+          a.localeCompare(b, 'el')
+        ),
       })),
     });
   } catch (err) {

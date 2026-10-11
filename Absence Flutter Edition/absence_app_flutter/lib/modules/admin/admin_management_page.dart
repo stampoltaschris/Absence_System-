@@ -493,6 +493,60 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
     }
   }
 
+  Future<void> _toggleInclusionParallel(Map<String, dynamic> teacher, bool enabled) async {
+    final id = teacher['id'] is int
+        ? teacher['id'] as int
+        : int.tryParse('${teacher['id']}');
+    if (id == null) return;
+
+    final index = _teachers.indexWhere((t) => t['id'] == teacher['id']);
+    if (index >= 0) {
+      setState(() {
+        _teachers[index] = {
+          ..._teachers[index],
+          'is_inclusion_parallel': enabled,
+        };
+      });
+    }
+
+    final result = await ApiService.setTeacherInclusionParallel(
+      userId: id,
+      enabled: enabled,
+    );
+
+    if (!mounted) return;
+
+    if (result['success'] != true) {
+      if (index >= 0) {
+        setState(() {
+          _teachers[index] = {
+            ..._teachers[index],
+            'is_inclusion_parallel': !enabled,
+          };
+        });
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(result['message'] ?? 'Αποτυχία ενημέρωσης.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          enabled
+              ? 'Ένταξης-Παράλληλης: ενεργό για ${teacher['name']}'
+              : 'Κύριος εκπαιδευτικός: ${teacher['name']}',
+        ),
+        backgroundColor: Colors.green,
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
   Future<void> _importTeachersFromExcel() async {
     try {
       final pickerResult = await FilePicker.pickFiles(
@@ -1597,27 +1651,77 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
                               final t = _teachers[index];
                               final name = t['name']?.toString() ?? '';
                               final username = t['username']?.toString() ?? '';
+                              final isParallel =
+                                  t['is_inclusion_parallel'] == true ||
+                                  t['isInclusionParallel'] == true;
                               return Card(
-                                child: ListTile(
-                                  leading: CircleAvatar(
-                                    backgroundColor: Colors.green.shade100,
-                                    child: Icon(
-                                      Icons.badge,
-                                      color: Colors.green.shade800,
-                                    ),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 8,
                                   ),
-                                  title: Text(
-                                    name,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                  subtitle: Text('@$username'),
-                                  trailing: Row(
-                                    mainAxisSize: MainAxisSize.min,
+                                  child: Row(
                                     children: [
+                                      CircleAvatar(
+                                        backgroundColor: isParallel
+                                            ? Colors.indigo.shade100
+                                            : Colors.green.shade100,
+                                        child: Icon(
+                                          isParallel
+                                              ? Icons.groups_rounded
+                                              : Icons.badge,
+                                          color: isParallel
+                                              ? Colors.indigo.shade800
+                                              : Colors.green.shade800,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              name,
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 2),
+                                            Text(
+                                              isParallel
+                                                  ? '@$username · Ένταξης-Παράλληλης'
+                                                  : '@$username · Κύριος εκπαιδευτικός',
+                                              style: TextStyle(
+                                                fontSize: 13,
+                                                color: Colors.grey.shade700,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      // Switch αριστερά από επεξεργασία/διαγραφή
+                                      Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          const Text(
+                                            'Ένταξης-\nΠαράλληλης',
+                                            textAlign: TextAlign.right,
+                                            style: TextStyle(fontSize: 11),
+                                          ),
+                                          const SizedBox(width: 4),
+                                          Switch(
+                                            value: isParallel,
+                                            materialTapTargetSize:
+                                                MaterialTapTargetSize.shrinkWrap,
+                                            onChanged: (v) =>
+                                                _toggleInclusionParallel(t, v),
+                                          ),
+                                        ],
+                                      ),
                                       IconButton(
                                         tooltip: 'Επεξεργασία',
+                                        visualDensity: VisualDensity.compact,
                                         icon: const Icon(
                                           Icons.edit,
                                           color: Colors.blue,
@@ -1626,6 +1730,7 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
                                       ),
                                       IconButton(
                                         tooltip: 'Διαγραφή',
+                                        visualDensity: VisualDensity.compact,
                                         icon: const Icon(
                                           Icons.delete,
                                           color: Colors.red,
@@ -1669,7 +1774,7 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
                           label: Text(
                             _isImportingAssignments
                                 ? 'Εισαγωγή...'
-                                : 'Excel (Ονοματεπώνυμο | Τμήματα)',
+                                : 'Excel ωρολόγιο / αναθέσεις',
                           ),
                           style: ElevatedButton.styleFrom(
                             backgroundColor: Colors.indigo.shade700,
@@ -1713,9 +1818,11 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'Excel: στήλη A = Ονοματεπώνυμο, στήλη B = Τμήματα '
-                    '(π.χ. Α1, Α3, ΒΘΣ1). Δημιουργεί λογαριασμό αν δεν υπάρχει '
-                    '(username = αρχικό ονόματος + επώνυμο λατινικά).',
+                    'Δέχεται: (1) Συνολικό ωρολόγιο aSc — στήλη ονομάτων + '
+                    'Δευτέρα…Παρασκευή με ώρες 1–7 στα κελιά, ή '
+                    '(2) επίπεδη λίστα Ονοματεπώνυμο | Ημέρα | Ώρα | Τμήμα. '
+                    'Εξάγει αυτόματα ημέρα, ώρα και τμήμα· δημιουργεί '
+                    'λογαριασμό αν λείπει.',
                     style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
                   ),
                   const SizedBox(height: 20),
@@ -1740,7 +1847,7 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
                                     const SizedBox(height: 12),
                                     Text(
                                       'Δεν υπάρχουν αναθέσεις.\n'
-                                      'Εισάγετε Excel με ονοματεπώνυμο και τμήματα.',
+                                      'Εισάγετε το Excel του συνολικού ωρολογίου.',
                                       textAlign: TextAlign.center,
                                       style: TextStyle(
                                         color: Colors.grey.shade600,
@@ -1756,13 +1863,15 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
                                   final name = a['name']?.toString() ?? '';
                                   final username =
                                       a['username']?.toString() ?? '';
-                                  final classes = (a['classes'] is List)
-                                      ? List<String>.from(
-                                          (a['classes'] as List).map(
-                                            (e) => e.toString(),
+                                  final slots = (a['slots'] is List)
+                                      ? List<Map<String, dynamic>>.from(
+                                          (a['slots'] as List).map(
+                                            (e) => Map<String, dynamic>.from(
+                                              e as Map,
+                                            ),
                                           ),
                                         )
-                                      : <String>[];
+                                      : <Map<String, dynamic>>[];
                                   return Card(
                                     margin: const EdgeInsets.only(bottom: 10),
                                     child: Padding(
@@ -1809,7 +1918,7 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
                                                 ),
                                               ),
                                               Text(
-                                                '${classes.length} τμήμ.',
+                                                '${slots.length} θέσεις',
                                                 style: TextStyle(
                                                   color: Colors.grey.shade600,
                                                   fontSize: 12,
@@ -1817,23 +1926,38 @@ class _AdminManagementPageState extends State<AdminManagementPage> {
                                               ),
                                             ],
                                           ),
-                                          if (classes.isNotEmpty) ...[
+                                          if (slots.isNotEmpty) ...[
                                             const SizedBox(height: 10),
                                             Wrap(
                                               spacing: 6,
                                               runSpacing: 6,
-                                              children: classes
+                                              children: slots
                                                   .map(
-                                                    (c) => Chip(
-                                                      label: Text(c),
-                                                      visualDensity:
-                                                          VisualDensity.compact,
-                                                      materialTapTargetSize:
-                                                          MaterialTapTargetSize
-                                                              .shrinkWrap,
-                                                      backgroundColor: Colors
-                                                          .indigo.shade50,
-                                                    ),
+                                                    (s) {
+                                                      final day = s['weekday']
+                                                              ?.toString() ??
+                                                          '';
+                                                      final hour =
+                                                          s['schoolHour']
+                                                                  ?.toString() ??
+                                                              '';
+                                                      final cls = s['className']
+                                                              ?.toString() ??
+                                                          '';
+                                                      return Chip(
+                                                        label: Text(
+                                                          '$day · $hour · $cls',
+                                                        ),
+                                                        visualDensity:
+                                                            VisualDensity
+                                                                .compact,
+                                                        materialTapTargetSize:
+                                                            MaterialTapTargetSize
+                                                                .shrinkWrap,
+                                                        backgroundColor: Colors
+                                                            .indigo.shade50,
+                                                      );
+                                                    },
                                                   )
                                                   .toList(),
                                             ),

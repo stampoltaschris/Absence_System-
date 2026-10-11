@@ -1,8 +1,5 @@
 const jwt = require('jsonwebtoken');
-require('dotenv').config();
-
-// 🔒 Χρήση του JWT Secret από το .env (με fallback ίδιο σε όλα τα αρχεία)
-const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_school_jwt_key_2026';
+const { JWT_SECRET } = require('../utils/jwt_secret');
 
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];

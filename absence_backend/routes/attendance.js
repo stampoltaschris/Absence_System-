@@ -122,7 +122,15 @@ async function checkSchoolSchedule() {
 // Μαζική Υποβολή Απουσιών (με Transaction)
 // ==========================================
 router.post('/submit', async (req, res) => {
-  const { attendanceList, userRole, isTestMode, className, period, absences } = req.body;
+  // isTestMode από client ΔΕΝ γίνεται αποδεκτό — μόνο admin ή force_test_mode στη βάση
+  const {
+    attendanceList,
+    userRole,
+    className,
+    period,
+    absences,
+    scheduleChangeConfirmed,
+  } = req.body;
   
   // Υποστήριξη και για τις δύο μορφές δεδομένων
   let listToProcess = attendanceList;
@@ -175,14 +183,20 @@ router.post('/submit', async (req, res) => {
   const currentUsername = req.user?.username || 'teacher';
   const currentUserRole = req.user?.role || userRole;
 
-  // Εκπαιδευτικός: μόνο τμήματα με ανάθεση
+  // Εκπαιδευτικός: μόνο δικά του τμήματα · άλλη ώρα μόνο με επιβεβαίωση αλλαγής προγράμματος
   if (currentUserRole !== 'admin') {
-    const allowed = await teacherCanAccessClass(req.user, targetClassName);
+    const { getAthensWeekdayName } = require('../utils/athens_time');
+    const allowed = await teacherCanAccessClass(req.user, targetClassName, {
+      weekday: getAthensWeekdayName(),
+      schoolHour: targetPeriod,
+      scheduleChangeConfirmed: scheduleChangeConfirmed === true,
+    });
     if (!allowed) {
       return res.status(403).json({
         message:
-          `Δεν έχετε ανάθεση στο τμήμα ${targetClassName}. ` +
-          'Επιτρέπεται καταχώριση μόνο στα τμήματα που σας έχουν ανατεθεί.',
+          `Δεν έχετε ανάθεση στο τμήμα ${targetClassName} ` +
+          `για ${getAthensWeekdayName()} / ${targetPeriod}. ` +
+          `Ξένα τμήματα δεν επιτρέπονται· για άλλη ώρα επιβεβαιώστε αλλαγή προγράμματος.`,
       });
     }
   }
@@ -192,9 +206,7 @@ router.post('/submit', async (req, res) => {
 
   if (schedule.isOffHours) {
     let allowed =
-      currentUserRole === 'admin' ||
-      schedule.forceTestMode === true ||
-      isTestMode === true;
+      currentUserRole === 'admin' || schedule.forceTestMode === true;
 
     if (!allowed && targetTeacherId) {
       const userQuery = await db.query('SELECT role FROM users WHERE id = $1', [targetTeacherId]);
@@ -205,12 +217,14 @@ router.post('/submit', async (req, res) => {
 
     if (!allowed) {
       return res.status(403).json({
-        message: `Η υποβολή απουσιών δεν επιτρέπεται (${schedule.reason}). Δικαίωμα δοκιμαστικής υποβολής έχει ο Διαχειριστής ή ενεργό Test Mode.`
+        message:
+          `Η υποβολή απουσιών δεν επιτρέπεται (${schedule.reason}). ` +
+          `Δικαίωμα δοκιμαστικής υποβολής έχει ο Διαχειριστής ή ενεργό Test Mode στις ρυθμίσεις ωραρίου.`,
       });
     }
     console.log(
       `🧪 [TEST MODE] Υποβολή εκτός ωραρίου επιτρέπεται (${schedule.reason}` +
-        `${schedule.forceTestMode ? ', forceTestMode=ON' : ''}).`
+        `${schedule.forceTestMode ? ', forceTestMode=ON' : ', admin'}).`
     );
   }
 
@@ -433,12 +447,20 @@ router.get('/records', async (req, res) => {
   }
 
   if (req.user?.role !== 'admin') {
-    const allowed = await teacherCanAccessClass(req.user, className);
+    const { getAthensWeekdayName } = require('../utils/athens_time');
+    const confirmed =
+      req.query.scheduleChangeConfirmed === 'true' ||
+      req.query.scheduleChangeConfirmed === '1';
+    const allowed = await teacherCanAccessClass(req.user, className, {
+      weekday: getAthensWeekdayName(),
+      schoolHour: period,
+      scheduleChangeConfirmed: confirmed,
+    });
     if (!allowed) {
       return res.status(403).json({
         message:
-          `Δεν έχετε ανάθεση στο τμήμα ${className}. ` +
-          'Επιτρέπεται πρόσβαση μόνο στα τμήματα που σας έχουν ανατεθεί.',
+          `Δεν έχετε ανάθεση στο τμήμα ${className} ` +
+          `για ${getAthensWeekdayName()} / ${period}.`,
       });
     }
   }
@@ -510,13 +532,18 @@ router.post('/hourly-removal', async (req, res) => {
   }
 
   if (currentUserRole !== 'admin') {
-    const allowed = await teacherCanAccessClass(req.user, className);
+    const { getAthensWeekdayName } = require('../utils/athens_time');
+    const allowed = await teacherCanAccessClass(req.user, className, {
+      weekday: getAthensWeekdayName(),
+      schoolHour: period,
+      scheduleChangeConfirmed: req.body?.scheduleChangeConfirmed === true,
+    });
     if (!allowed) {
       return res.status(403).json({
         success: false,
         message:
-          `Δεν έχετε ανάθεση στο τμήμα ${className}. ` +
-          'Επιτρέπεται ενέργεια μόνο στα τμήματα που σας έχουν ανατεθεί.',
+          `Δεν έχετε ανάθεση στο τμήμα ${className} ` +
+          `για ${getAthensWeekdayName()} / ${period}.`,
       });
     }
   }

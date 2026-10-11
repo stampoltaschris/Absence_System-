@@ -14,11 +14,15 @@ class TakeAttendancePage extends StatefulWidget {
   /// true = ήδη υποβληθέν τμήμα· επιτρέπεται μόνο ωριαία απομάκρυνση
   final bool hourlyRemovalOnly;
 
+  /// Επιβεβαιωμένη αλλαγή προγράμματος (δικό του τμήμα, άλλη ώρα)
+  final bool scheduleChangeConfirmed;
+
   const TakeAttendancePage({
     super.key,
     required this.className,
     required this.currentPeriod,
     this.hourlyRemovalOnly = false,
+    this.scheduleChangeConfirmed = false,
   });
 
   @override
@@ -81,8 +85,12 @@ class _TakeAttendancePageState extends State<TakeAttendancePage>
     _stopAlertEffects();
     _flashController.dispose();
     _alertPlayer.dispose();
+    // Ξεκλείδωμα μόνο του τρέχοντος slot (τμήμα + διδακτική ώρα) — αυστηρές αναθέσεις ωρολογίου
     if (!_hasSubmitted) {
-      ApiService.unlockClass(widget.className);
+      ApiService.unlockClass(
+        widget.className,
+        currentHour: widget.currentPeriod,
+      );
     }
     super.dispose();
   }
@@ -235,6 +243,7 @@ class _TakeAttendancePageState extends State<TakeAttendancePage>
           final recordsRes = await ApiService.getAttendanceRecords(
             className: widget.className,
             period: widget.currentPeriod,
+            scheduleChangeConfirmed: widget.scheduleChangeConfirmed,
           );
           final records = recordsRes['records'];
           if (records is List) {
@@ -359,6 +368,7 @@ class _TakeAttendancePageState extends State<TakeAttendancePage>
       className: widget.className,
       period: widget.currentPeriod,
       absences: _buildAbsencesPayload(),
+      scheduleChangeConfirmed: widget.scheduleChangeConfirmed,
     );
 
     setState(() => _isLoading = false);
@@ -440,6 +450,7 @@ class _TakeAttendancePageState extends State<TakeAttendancePage>
       className: widget.className,
       period: widget.currentPeriod,
       studentIds: ids,
+      scheduleChangeConfirmed: widget.scheduleChangeConfirmed,
     );
     setState(() => _isLoading = false);
 
